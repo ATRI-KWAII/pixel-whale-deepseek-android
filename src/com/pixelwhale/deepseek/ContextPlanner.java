@@ -61,6 +61,8 @@ final class ContextPlanner {
 
     private static int cost(ConversationStore.Message message) {
         return estimate(message.content) + 8 +
-                (message.imagePath == null || message.imagePath.isEmpty() ? 0 : 1024);
+                (message.imagePath == null || message.imagePath.isEmpty() ? 0 : 1024) +
+                (message.filePath == null ? 0 : 2048) +
+                (message.serverToolCalls == null ? 0 : estimate(message.serverToolCalls));
     }
 }

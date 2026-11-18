@@ -53,7 +53,7 @@ try {
             -keyalg RSA -keysize 2048 -validity 3650
         if ($LASTEXITCODE -ne 0) { throw '签名密钥创建失败' }
     }
-    $Apk = Join-Path $OutputRoot '像素鲸语-DeepSeek-2.2.apk'
+    $Apk = Join-Path $OutputRoot '像素鲸语-DeepSeek-2.3.apk'
     $SignedApk = "$Build\signed.apk"
     & "$Tools\apksigner.bat" sign --ks $Keystore --ks-key-alias pixelwhale `
         --ks-pass pass:android --key-pass pass:android --out $SignedApk "$Build\aligned.apk"

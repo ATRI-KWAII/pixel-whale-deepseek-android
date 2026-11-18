@@ -49,6 +49,7 @@ public final class MainActivity extends Activity {
     private static final int CORAL = Color.rgb(244, 145, 121);
     private static final int MINT = Color.rgb(222, 244, 243);
     private static final int IMAGE_REQUEST = 18;
+    private static final int FILE_REQUEST = 19;
     private static final int PAGE_SIZE = 40;
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
@@ -72,6 +73,8 @@ public final class MainActivity extends Activity {
     private TextView titleView;
     private TextView modelView;
     private TextView sendButton;
+    private TextView webButton;
+    private boolean webEnabled;
     private EditText composer;
     private LinearLayout chatColumn;
     private ScrollView chatScroll;
@@ -79,7 +82,10 @@ public final class MainActivity extends Activity {
     private ImageView pendingImagePreview;
     private TextView pendingImageLabel;
     private String pendingImagePath;
+    private String pendingFilePath;
+    private TextView pendingFileLabel;
     private boolean imageLoading;
+    private boolean fileLoading;
     private int imageSelectionId;
     private int visibleMessageCount = PAGE_SIZE;
     private long renderedChatId = -1;
@@ -91,6 +97,7 @@ public final class MainActivity extends Activity {
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
         secrets = new SecretStore(this);
         store = new ConversationStore(this);
+        webEnabled = getPreferences(MODE_PRIVATE).getBoolean("web_enabled", false);
         currentId = store.selectedChat().id;
         buildScreen();
         renderChat(true);
@@ -209,6 +216,31 @@ public final class MainActivity extends Activity {
         removeImage.setOnClickListener(v -> discardPendingImage());
         pendingImageRow.setVisibility(View.GONE);
 
+        pendingFileLabel = label("", 12, NAVY, true);
+        pendingFileLabel.setPadding(dp(12), dp(9), dp(12), dp(9));
+        pendingFileLabel.setBackground(pressable(box(MINT, 12, BORDER, 1)));
+        LinearLayout.LayoutParams fileParams = new LinearLayout.LayoutParams(-1, -2);
+        fileParams.bottomMargin = dp(7);
+        bottom.addView(pendingFileLabel, fileParams);
+        pendingFileLabel.setOnClickListener(v -> {
+            FileStore.delete(pendingFilePath);
+            pendingFilePath = null;
+            updatePendingFile();
+        });
+        updatePendingFile();
+
+        webButton = label("", 12, BLUE, true);
+        webButton.setPadding(dp(13), dp(7), dp(13), dp(7));
+        LinearLayout.LayoutParams webParams = new LinearLayout.LayoutParams(-2, -2);
+        webParams.bottomMargin = dp(7);
+        bottom.addView(webButton, webParams);
+        webButton.setOnClickListener(v -> {
+            webEnabled = !webEnabled;
+            getPreferences(MODE_PRIVATE).edit().putBoolean("web_enabled", webEnabled).apply();
+            updateWebButton();
+        });
+        updateWebButton();
+
         LinearLayout composeRow = new LinearLayout(this);
         composeRow.setGravity(Gravity.CENTER_VERTICAL);
         composeRow.setPadding(dp(6), dp(5), dp(6), dp(5));
@@ -216,13 +248,16 @@ public final class MainActivity extends Activity {
         composeRow.setElevation(dp(3));
         bottom.addView(composeRow, new LinearLayout.LayoutParams(-1, -2));
 
-        TextView attach = label("图片", 12, BLUE, true);
+        TextView attach = label("＋", 22, BLUE, true);
         attach.setGravity(Gravity.CENTER);
         attach.setBackground(pressable(box(MINT, 14, 0, 0)));
         LinearLayout.LayoutParams attachParams = new LinearLayout.LayoutParams(dp(42), dp(42));
         attachParams.rightMargin = dp(5);
         composeRow.addView(attach, attachParams);
-        attach.setOnClickListener(v -> pickImage());
+        attach.setOnClickListener(v -> new AlertDialog.Builder(this)
+                .setItems(new String[]{"发送图片", "发送文档"}, (dialog, which) -> {
+                    if (which == 0) pickImage(); else pickFile();
+                }).show());
 
         composer = new EditText(this);
         composer.setTextSize(15);
@@ -252,6 +287,17 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams footParams = new LinearLayout.LayoutParams(-1, -2);
         footParams.topMargin = dp(7);
         bottom.addView(footnote, footParams);
+    }
+
+    private void updateWebButton() {
+        webButton.setText(webEnabled ? "⌕  联网搜索 · 链接读取  开" : "⌕  联网搜索 · 链接读取  关");
+        webButton.setBackground(pressable(box(webEnabled ? MINT : WHITE, 12, BORDER, 1)));
+    }
+
+    private void updatePendingFile() {
+        pendingFileLabel.setVisibility(pendingFilePath == null ? View.GONE : View.VISIBLE);
+        if (pendingFilePath != null)
+            pendingFileLabel.setText("▤  " + FileStore.name(pendingFilePath) + "  ·  点此移除");
     }
 
     private void renderChat() { renderChat(false); }
@@ -453,10 +499,21 @@ public final class MainActivity extends Activity {
             showThumbnail(picture, message.imagePath, 420);
             picture.setOnClickListener(v -> showFullImage(message.imagePath));
         }
-        TextView bubble = label(message.content, 15, user ? WHITE : NAVY, false);
-        if (!user && message.id != -1) bubble.setText(MarkdownText.render(message.content));
+        if (message.filePath != null) {
+            TextView file = label("▤  " + FileStore.name(message.filePath), 12, BLUE, true);
+            file.setPadding(dp(10), dp(7), dp(10), dp(7));
+            file.setBackground(box(MINT, 10, BORDER, 1));
+            body.addView(file, new LinearLayout.LayoutParams(-2, -2));
+        }
+        String displayContent = message.content + (message.sources == null ? "" : message.sources);
+        TextView bubble = label(displayContent, 15, user ? WHITE : NAVY, false);
+        if (!user && message.id != -1) bubble.setText(MarkdownText.render(displayContent));
         if (message.id == -1) streamingBubble = bubble;
         bubble.setTextIsSelectable(true);
+        if (!user && message.sources != null && !message.sources.isEmpty()) {
+            android.text.util.Linkify.addLinks(bubble, android.text.util.Linkify.WEB_URLS);
+            bubble.setMovementMethod(android.text.method.LinkMovementMethod.getInstance());
+        }
         bubble.setLineSpacing(dp(4), 1.02f);
         bubble.setPadding(dp(15), dp(12), dp(15), dp(12));
         GradientDrawable bubbleShape = box(user ? BLUE : WHITE, 17,
@@ -674,6 +731,7 @@ public final class MainActivity extends Activity {
             side.addView(more, new LinearLayout.LayoutParams(dp(38), dp(36)));
             row.setOnClickListener(v -> {
                 discardPendingImage();
+                discardPendingFile();
                 currentId = chat.id;
                 store.selectChat(currentId);
                 dialog.dismiss();
@@ -778,7 +836,7 @@ public final class MainActivity extends Activity {
                 .setSingleChoiceItems(new String[]{"DeepSeek Flash · 快速问答",
                         "DeepSeek Flash · 深度思考", "DeepSeek V4 Pro · 深度思考"},
                         selected, (dialog, which) -> {
-                    if (which == 2 && hasActiveImage(store.messages(currentId),
+                    if (which == 2 && hasActiveAttachment(store.messages(currentId),
                             chat.summaryUntilId)) {
                         Toast.makeText(this, "图片会话请使用 DeepSeek Flash", Toast.LENGTH_LONG).show();
                         return;
@@ -858,7 +916,7 @@ public final class MainActivity extends Activity {
                 .setTitle("删除这个会话？")
                 .setMessage("这个会话的消息、系统提示词和压缩摘要都会从本机删除。")
                 .setPositiveButton("删除", (d, which) -> {
-                    if (currentId == chatId) discardPendingImage();
+                    if (currentId == chatId) { discardPendingImage(); discardPendingFile(); }
                     store.delete(chatId);
                     if (currentId == chatId) currentId = store.selectedChat().id;
                     refresh.run();
@@ -878,6 +936,7 @@ public final class MainActivity extends Activity {
                 .setMessage("消息与压缩摘要会删除；会话名称和系统提示词会保留。")
                 .setPositiveButton("清空", (d, which) -> {
                     discardPendingImage();
+                    discardPendingFile();
                     store.clear(targetId);
                     errorText = null;
                     renderChat();
@@ -975,6 +1034,7 @@ public final class MainActivity extends Activity {
 
     private void newChat() {
         discardPendingImage();
+        discardPendingFile();
         currentId = store.createChat();
         errorText = null;
         renderChat(true);
@@ -995,17 +1055,19 @@ public final class MainActivity extends Activity {
 
     private void send() {
         if (busy) return;
-        if (imageLoading) {
-            Toast.makeText(this, "请等图片处理完成", Toast.LENGTH_SHORT).show();
+        if (imageLoading || fileLoading) {
+            Toast.makeText(this, "请等附件处理完成", Toast.LENGTH_SHORT).show();
             return;
         }
         String question = composer.getText().toString().trim();
-        if (question.isEmpty() && pendingImagePath == null) return;
+        if (question.isEmpty() && pendingImagePath == null && pendingFilePath == null) return;
         if (keyOrPrompt() == null) return;
-        if (question.isEmpty()) question = "请描述这张图片。";
-        store.addMessage(currentId, "user", question, pendingImagePath);
+        if (question.isEmpty()) question = pendingFilePath == null ? "请描述这张图片。" : "请总结这份文档。";
+        store.addMessage(currentId, "user", question, pendingImagePath, pendingFilePath);
         pendingImagePath = null;
+        pendingFilePath = null;
         updatePendingImage();
+        updatePendingFile();
         composer.setText("");
         InputMethodManager keyboard = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
         if (keyboard != null) keyboard.hideSoftInputFromWindow(composer.getWindowToken(), 0);
@@ -1035,12 +1097,18 @@ public final class MainActivity extends Activity {
         if (!manualCompression && (snapshot.isEmpty() ||
                 !"user".equals(snapshot.get(snapshot.size() - 1).role))) return;
         if (!manualCompression && "pro".equals(selectedChat.model) &&
-                hasActiveImage(snapshot, selectedChat.summaryUntilId)) {
+                hasActiveAttachment(snapshot, selectedChat.summaryUntilId)) {
             store.setModel(currentId, "flash");
             selectedChat = store.getChat(currentId);
             Toast.makeText(this, "此会话含图片，已切换到 DeepSeek Flash", Toast.LENGTH_LONG).show();
         }
+        if (!manualCompression && webEnabled && "pro".equals(selectedChat.model)) {
+            store.setModel(currentId, "think");
+            selectedChat = store.getChat(currentId);
+            Toast.makeText(this, "联网工具使用 DeepSeek Flash，已切换模型", Toast.LENGTH_LONG).show();
+        }
         final ConversationStore.Conversation chat = selectedChat;
+        final boolean useWeb = webEnabled;
         if (manualCompression && ContextPlanner.nextBatch(snapshot, chat.summaryUntilId) == null) {
             Toast.makeText(this, "至少需要 10 条消息，才能保留最近对话并压缩较早内容", Toast.LENGTH_LONG).show();
             return;
@@ -1060,9 +1128,20 @@ public final class MainActivity extends Activity {
         renderChat(!manualCompression);
 
         worker.execute(() -> {
+            DeepSeekClient.DocumentResolver documents = message -> {
+                if (message.fileId != null && !message.fileId.isEmpty()) return message.fileId;
+                runOnUiThread(() -> {
+                    progressText = "正在上传并解析文档…";
+                    if (!isDestroyed() && currentId == targetId) renderChat(false);
+                });
+                String id = DeepSeekClient.uploadFile(apiKey, message.filePath, control);
+                message.fileId = id;
+                store.setFileId(message.id, id);
+                return id;
+            };
             String summary = chat.summary;
             long until = chat.summaryUntilId;
-            String answer = null;
+            DeepSeekClient.Reply reply = null;
             String failure = null;
             final long[] lastStreamUpdate = {0};
             try {
@@ -1072,7 +1151,7 @@ public final class MainActivity extends Activity {
                             (manualCompression || ContextPlanner.estimatedTokens(
                                     ContextPlanner.active(snapshot, until), summary) >
                                     ContextPlanner.AUTO_THRESHOLD)) {
-                        summary = DeepSeekClient.summarize(apiKey, summary, batch.messages, control);
+                        summary = DeepSeekClient.summarize(apiKey, summary, batch.messages, documents, control);
                         until = batch.throughId;
                     }
                 }
@@ -1081,8 +1160,8 @@ public final class MainActivity extends Activity {
                         progressText = "小鲸鱼正在想答案…";
                         if (!isDestroyed() && currentId == targetId) renderChat(false);
                     });
-                    answer = DeepSeekClient.reply(apiKey, chat.model, chat.systemPrompt, summary,
-                            ContextPlanner.active(snapshot, until), control, accumulated -> {
+                    reply = DeepSeekClient.reply(apiKey, chat.model, useWeb, chat.systemPrompt, summary,
+                            ContextPlanner.active(snapshot, until), documents, control, accumulated -> {
                                 long now = System.currentTimeMillis();
                                 if (now - lastStreamUpdate[0] < 70) return;
                                 lastStreamUpdate[0] = now;
@@ -1106,7 +1185,9 @@ public final class MainActivity extends Activity {
             }
             final String finalSummary = summary;
             final long finalUntil = until;
-            final String finalAnswer = answer;
+            final String finalAnswer = reply == null ? null : reply.text;
+            final String finalToolCalls = reply == null ? null : reply.serverToolCalls;
+            final String finalSources = reply == null ? null : reply.sources;
             final String finalFailure = failure;
             runOnUiThread(() -> {
                 if (isDestroyed()) return;
@@ -1121,7 +1202,7 @@ public final class MainActivity extends Activity {
                 if (finalUntil != chat.summaryUntilId)
                     store.updateSummary(targetId, finalSummary, finalUntil);
                 if (finalAnswer != null && !finalAnswer.isEmpty())
-                    store.addMessage(targetId, "assistant", finalAnswer);
+                    store.addAssistantWithTools(targetId, finalAnswer, finalToolCalls, finalSources);
                 if (control.isCancelled()) {
                     errorChatId = targetId;
                     errorText = finalAnswer == null || finalAnswer.isEmpty()
@@ -1151,10 +1232,10 @@ public final class MainActivity extends Activity {
         return true;
     }
 
-    private boolean hasActiveImage(List<ConversationStore.Message> all, long untilId) {
+    private boolean hasActiveAttachment(List<ConversationStore.Message> all, long untilId) {
         for (ConversationStore.Message message : all) {
-            if (message.id > untilId && message.imagePath != null &&
-                    !message.imagePath.isEmpty()) return true;
+            if (message.id > untilId && ((message.imagePath != null &&
+                    !message.imagePath.isEmpty()) || message.filePath != null)) return true;
         }
         return false;
     }
@@ -1196,6 +1277,17 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void pickFile() {
+        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+        intent.setType("*/*");
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        try {
+            startActivityForResult(Intent.createChooser(intent, "选择文档"), FILE_REQUEST);
+        } catch (Exception e) {
+            Toast.makeText(this, "手机上没有可用的文件选择器", Toast.LENGTH_LONG).show();
+        }
+    }
+
     private void updatePendingImage() {
         boolean visible = imageLoading || pendingImagePath != null;
         pendingImageRow.setVisibility(visible ? View.VISIBLE : View.GONE);
@@ -1215,6 +1307,12 @@ public final class MainActivity extends Activity {
         imageLoading = false;
         if (previous != null) ImageStore.delete(previous);
         if (pendingImageRow != null) updatePendingImage();
+    }
+
+    private void discardPendingFile() {
+        FileStore.delete(pendingFilePath);
+        pendingFilePath = null;
+        updatePendingFile();
     }
 
     private void showThumbnail(ImageView view, String path, int maxPixels) {
@@ -1278,6 +1376,29 @@ public final class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == FILE_REQUEST && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            Uri uri = data.getData();
+            fileLoading = true;
+            pendingFileLabel.setText("正在处理文档…");
+            pendingFileLabel.setVisibility(View.VISIBLE);
+            imageWorker.execute(() -> {
+                String saved = null;
+                String failure = null;
+                try { saved = FileStore.save(getApplicationContext(), uri); }
+                catch (Exception e) { failure = e.getMessage(); }
+                String result = saved;
+                String error = failure;
+                runOnUiThread(() -> {
+                    if (isDestroyed()) { FileStore.delete(result); return; }
+                    fileLoading = false;
+                    if (result != null) {
+                        FileStore.delete(pendingFilePath);
+                        pendingFilePath = result;
+                        updatePendingFile();
+                    } else Toast.makeText(this, error == null ? "文档处理失败" : error, Toast.LENGTH_LONG).show();
+                });
+            });
+        }
         if (requestCode == IMAGE_REQUEST && resultCode == RESULT_OK && data != null &&
                 data.getData() != null) {
             Uri uri = data.getData();
@@ -1314,6 +1435,7 @@ public final class MainActivity extends Activity {
 
     @Override protected void onDestroy() {
         discardPendingImage();
+        discardPendingFile();
         worker.shutdown();
         imageWorker.shutdown();
         thumbnailWorker.shutdown();
