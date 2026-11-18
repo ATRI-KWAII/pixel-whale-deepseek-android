@@ -23,8 +23,12 @@ final class DeepSeekClient {
         void onText(String accumulated);
     }
 
+    interface ToolProgress {
+        void onStatus(String status);
+    }
+
     interface DocumentResolver {
-        String resolve(ConversationStore.Message message) throws Exception;
+        String resolve(ConversationStore.Message message, String path, int extraIndex) throws Exception;
     }
 
     static final class Reply {
@@ -62,7 +66,7 @@ final class DeepSeekClient {
 
     static Reply reply(String apiKey, String model, boolean webEnabled, String systemPrompt, String summary,
                         List<ConversationStore.Message> messages, DocumentResolver documents, Control control,
-                        Progress progress) throws Exception {
+                        Progress progress, ToolProgress toolProgress) throws Exception {
         JSONArray requestMessages = new JSONArray();
         StringBuilder instruction = new StringBuilder();
         if (systemPrompt != null && !systemPrompt.trim().isEmpty())
@@ -74,7 +78,7 @@ final class DeepSeekClient {
         }
         if (instruction.length() > 0) requestMessages.put(entry("system", instruction.toString()));
         for (ConversationStore.Message item : messages) {
-            if ("pro".equals(model) && hasImage(item))
+            if ("pro".equals(model) && hasAnyAttachment(item))
                 throw new Exception("V4 Pro 不支持图片，请切换到 DeepSeek Flash。");
             requestMessages.put(entry(item, documents));
         }
@@ -124,6 +128,17 @@ final class DeepSeekClient {
                     JSONArray choices = frame.optJSONArray("choices");
                     if (choices == null || choices.length() == 0) continue;
                     JSONObject choice = choices.getJSONObject(0);
+                    JSONObject toolEvent = choice.optJSONObject("server_tool_event");
+                    if (toolEvent != null) {
+                        String type = toolEvent.optString("type", "");
+                        if ("call_started".equals(type)) {
+                            JSONObject call = toolEvent.optJSONObject("call");
+                            String kind = call == null ? "" : call.optString("kind", "");
+                            toolProgress.onStatus("read_link".equals(kind) ? "正在读取网页…" : "正在搜索网络…");
+                        } else if ("call_completed".equals(type)) {
+                            toolProgress.onStatus("正在整理搜索结果…");
+                        }
+                    }
                     String finish = choice.optString("finish_reason", "");
                     if ("content_filter".equals(finish)) refused = true;
                     if (!finish.isEmpty() && !"null".equals(finish)) completed = true;
@@ -159,7 +174,9 @@ final class DeepSeekClient {
                 String url = item == null ? "" : item.optString("url", "");
                 if ((url.startsWith("https://") || url.startsWith("http://")) && seen.add(url)) {
                     if (sources.length() == 0) sources.append("\n\n来源：");
-                    sources.append("\n").append(seen.size()).append(". ").append(url);
+                    String title = item.optString("title", "").replace('\n', ' ').trim();
+                    if (title.isEmpty()) title = url;
+                    sources.append("\n").append(seen.size()).append(". ").append(title).append(" · ").append(url);
                 }
             }
         }
@@ -188,7 +205,18 @@ final class DeepSeekClient {
             if (item.filePath != null) {
                 transcriptParts.put(textPart(transcript.toString()));
                 transcript.setLength(0);
-                transcriptParts.put(filePart(documents.resolve(item)));
+                transcriptParts.put(filePart(documents.resolve(item, item.filePath, -1)));
+                hasImage = true;
+            }
+            JSONArray extras = ConversationStore.extras(item);
+            for (int i = 0; i < extras.length(); i++) {
+                JSONObject extra = extras.optJSONObject(i);
+                if (extra == null) continue;
+                transcriptParts.put(textPart(transcript.toString()));
+                transcript.setLength(0);
+                String path = extra.optString("path", "");
+                transcriptParts.put("image".equals(extra.optString("type")) ?
+                        imagePart(path) : filePart(documents.resolve(item, path, i)));
                 hasImage = true;
             }
         }
@@ -267,7 +295,7 @@ final class DeepSeekClient {
     }
 
     private static JSONObject entry(ConversationStore.Message message, DocumentResolver documents) throws Exception {
-        if (!hasImage(message) && message.filePath == null) {
+        if (!hasAnyAttachment(message)) {
             JSONObject simple = entry(message.role, message.content);
             if (message.serverToolCalls != null)
                 simple.put("server_tool_calls", new JSONArray(message.serverToolCalls));
@@ -278,8 +306,20 @@ final class DeepSeekClient {
         JSONArray parts = new JSONArray();
         if (!message.content.trim().isEmpty()) parts.put(textPart(message.content));
         if (hasImage(message)) parts.put(imagePart(message.imagePath));
-        if (message.filePath != null) parts.put(filePart(documents.resolve(message)));
+        if (message.filePath != null) parts.put(filePart(documents.resolve(message, message.filePath, -1)));
+        JSONArray extras = ConversationStore.extras(message);
+        for (int i = 0; i < extras.length(); i++) {
+            JSONObject extra = extras.optJSONObject(i);
+            if (extra == null) continue;
+            String path = extra.optString("path", "");
+            parts.put("image".equals(extra.optString("type")) ? imagePart(path) :
+                    filePart(documents.resolve(message, path, i)));
+        }
         return entry(message.role, parts);
+    }
+
+    private static boolean hasAnyAttachment(ConversationStore.Message message) {
+        return hasImage(message) || message.filePath != null || ConversationStore.extras(message).length() > 0;
     }
 
     private static JSONObject filePart(String id) throws Exception {
@@ -330,6 +370,34 @@ final class DeepSeekClient {
             control.detach(connection);
             connection.disconnect();
         }
+    }
+
+    static JSONArray listFiles(String apiKey) throws Exception {
+        JSONObject response = fileRequest(apiKey, "GET", "https://api.deepseek.com/files?limit=100&order=desc");
+        JSONArray data = response.optJSONArray("data");
+        return data == null ? new JSONArray() : data;
+    }
+
+    static void deleteFile(String apiKey, String id) throws Exception {
+        if (id == null || !id.matches("file-api-[a-zA-Z0-9-]+"))
+            throw new IOException("文件 ID 无效。" );
+        JSONObject response = fileRequest(apiKey, "DELETE", "https://api.deepseek.com/files/" + id);
+        if (!response.optBoolean("deleted")) throw new IOException("DeepSeek 未确认删除此文件。" );
+    }
+
+    private static JSONObject fileRequest(String apiKey, String method, String url) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+        try {
+            connection.setRequestMethod(method);
+            connection.setConnectTimeout(15000);
+            connection.setReadTimeout(30000);
+            connection.setRequestProperty("Authorization", "Bearer " + apiKey);
+            int status = connection.getResponseCode();
+            InputStream body = status >= 200 && status < 300 ? connection.getInputStream() : connection.getErrorStream();
+            String response = body == null ? "" : readLimited(body);
+            if (status < 200 || status >= 300) throw statusError(status);
+            return new JSONObject(response);
+        } finally { connection.disconnect(); }
     }
 
     private static boolean hasImage(ConversationStore.Message message) {

@@ -2,6 +2,8 @@ package com.pixelwhale.deepseek;
 
 import java.util.ArrayList;
 import java.util.List;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 /** Chooses old messages to summarize while keeping the recent conversation verbatim. */
 final class ContextPlanner {
@@ -60,9 +62,17 @@ final class ContextPlanner {
     }
 
     private static int cost(ConversationStore.Message message) {
-        return estimate(message.content) + 8 +
+        int cost = estimate(message.content) + 8 +
                 (message.imagePath == null || message.imagePath.isEmpty() ? 0 : 1024) +
                 (message.filePath == null ? 0 : 2048) +
                 (message.serverToolCalls == null ? 0 : estimate(message.serverToolCalls));
+        if (message.extraAttachments != null) {
+            JSONArray extras = ConversationStore.extras(message);
+            for (int i = 0; i < extras.length(); i++) {
+                JSONObject item = extras.optJSONObject(i);
+                if (item != null) cost += "image".equals(item.optString("type")) ? 1024 : 2048;
+            }
+        }
+        return cost;
     }
 }

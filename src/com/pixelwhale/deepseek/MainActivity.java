@@ -35,9 +35,14 @@ import android.util.LruCache;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.List;
+import java.util.ArrayList;
 import java.util.Locale;
+import org.json.JSONArray;
+import org.json.JSONObject;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.io.InputStream;
+import java.io.OutputStream;
 
 public final class MainActivity extends Activity {
     private static final int NAVY = Color.rgb(24, 59, 88);
@@ -50,6 +55,8 @@ public final class MainActivity extends Activity {
     private static final int MINT = Color.rgb(222, 244, 243);
     private static final int IMAGE_REQUEST = 18;
     private static final int FILE_REQUEST = 19;
+    private static final int EXPORT_REQUEST = 20;
+    private static final int IMPORT_REQUEST = 21;
     private static final int PAGE_SIZE = 40;
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
@@ -83,10 +90,14 @@ public final class MainActivity extends Activity {
     private TextView pendingImageLabel;
     private String pendingImagePath;
     private String pendingFilePath;
+    private final List<String> extraImages = new ArrayList<>();
+    private final List<String> extraFiles = new ArrayList<>();
     private TextView pendingFileLabel;
     private boolean imageLoading;
     private boolean fileLoading;
+    private boolean archiveBusy;
     private int imageSelectionId;
+    private int fileSelectionId;
     private int visibleMessageCount = PAGE_SIZE;
     private long renderedChatId = -1;
 
@@ -97,8 +108,13 @@ public final class MainActivity extends Activity {
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
         secrets = new SecretStore(this);
         store = new ConversationStore(this);
-        webEnabled = getPreferences(MODE_PRIVATE).getBoolean("web_enabled", false);
         currentId = store.selectedChat().id;
+        android.content.SharedPreferences legacySettings = getPreferences(MODE_PRIVATE);
+        if (!legacySettings.getBoolean("web_setting_migrated", false)) {
+            if (legacySettings.getBoolean("web_enabled", false)) store.enableWebForAllChats();
+            legacySettings.edit().putBoolean("web_setting_migrated", true).apply();
+        }
+        webEnabled = store.getChat(currentId).webEnabled;
         buildScreen();
         renderChat(true);
     }
@@ -223,9 +239,7 @@ public final class MainActivity extends Activity {
         fileParams.bottomMargin = dp(7);
         bottom.addView(pendingFileLabel, fileParams);
         pendingFileLabel.setOnClickListener(v -> {
-            FileStore.delete(pendingFilePath);
-            pendingFilePath = null;
-            updatePendingFile();
+            discardPendingFile();
         });
         updatePendingFile();
 
@@ -236,7 +250,7 @@ public final class MainActivity extends Activity {
         bottom.addView(webButton, webParams);
         webButton.setOnClickListener(v -> {
             webEnabled = !webEnabled;
-            getPreferences(MODE_PRIVATE).edit().putBoolean("web_enabled", webEnabled).apply();
+            store.setWebEnabled(currentId, webEnabled);
             updateWebButton();
         });
         updateWebButton();
@@ -295,9 +309,9 @@ public final class MainActivity extends Activity {
     }
 
     private void updatePendingFile() {
-        pendingFileLabel.setVisibility(pendingFilePath == null ? View.GONE : View.VISIBLE);
+        pendingFileLabel.setVisibility(pendingFilePath == null && extraFiles.isEmpty() ? View.GONE : View.VISIBLE);
         if (pendingFilePath != null)
-            pendingFileLabel.setText("▤  " + FileStore.name(pendingFilePath) + "  ·  点此移除");
+            pendingFileLabel.setText("▤  已选 " + (extraFiles.size() + 1) + " 份文档 · 点此移除全部");
     }
 
     private void renderChat() { renderChat(false); }
@@ -309,6 +323,8 @@ public final class MainActivity extends Activity {
             chat = store.selectedChat();
             currentId = chat.id;
         }
+        webEnabled = chat.webEnabled;
+        updateWebButton();
         if (renderedChatId != currentId) {
             visibleMessageCount = PAGE_SIZE;
             renderedChatId = currentId;
@@ -499,21 +515,38 @@ public final class MainActivity extends Activity {
             showThumbnail(picture, message.imagePath, 420);
             picture.setOnClickListener(v -> showFullImage(message.imagePath));
         }
+        JSONArray extras = ConversationStore.extras(message);
+        for (int i = 0; i < extras.length(); i++) {
+            JSONObject extra = extras.optJSONObject(i);
+            if (extra == null || !"image".equals(extra.optString("type"))) continue;
+            String path = extra.optString("path", "");
+            ImageView picture = new ImageView(this);
+            picture.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            picture.setClipToOutline(true);
+            LinearLayout.LayoutParams pictureParams = new LinearLayout.LayoutParams(dp(190), dp(150));
+            pictureParams.bottomMargin = dp(6);
+            body.addView(picture, pictureParams);
+            showThumbnail(picture, path, 420);
+            picture.setOnClickListener(v -> showFullImage(path));
+        }
         if (message.filePath != null) {
             TextView file = label("▤  " + FileStore.name(message.filePath), 12, BLUE, true);
             file.setPadding(dp(10), dp(7), dp(10), dp(7));
             file.setBackground(box(MINT, 10, BORDER, 1));
             body.addView(file, new LinearLayout.LayoutParams(-2, -2));
         }
-        String displayContent = message.content + (message.sources == null ? "" : message.sources);
-        TextView bubble = label(displayContent, 15, user ? WHITE : NAVY, false);
-        if (!user && message.id != -1) bubble.setText(MarkdownText.render(displayContent));
+        for (int i = 0; i < extras.length(); i++) {
+            JSONObject extra = extras.optJSONObject(i);
+            if (extra == null || !"file".equals(extra.optString("type"))) continue;
+            TextView file = label("▤  " + FileStore.name(extra.optString("path", "")), 12, BLUE, true);
+            file.setPadding(dp(10), dp(7), dp(10), dp(7));
+            file.setBackground(box(MINT, 10, BORDER, 1));
+            body.addView(file, new LinearLayout.LayoutParams(-2, -2));
+        }
+        TextView bubble = label(message.content, 15, user ? WHITE : NAVY, false);
+        if (!user && message.id != -1) bubble.setText(MarkdownText.render(message.content));
         if (message.id == -1) streamingBubble = bubble;
         bubble.setTextIsSelectable(true);
-        if (!user && message.sources != null && !message.sources.isEmpty()) {
-            android.text.util.Linkify.addLinks(bubble, android.text.util.Linkify.WEB_URLS);
-            bubble.setMovementMethod(android.text.method.LinkMovementMethod.getInstance());
-        }
         bubble.setLineSpacing(dp(4), 1.02f);
         bubble.setPadding(dp(15), dp(12), dp(15), dp(12));
         GradientDrawable bubbleShape = box(user ? BLUE : WHITE, 17,
@@ -524,6 +557,31 @@ public final class MainActivity extends Activity {
         bubble.setBackground(bubbleShape);
         bubble.setElevation(dp(1));
         body.addView(bubble, new LinearLayout.LayoutParams(-2, -2));
+        if (!user && message.sources != null && !message.sources.isEmpty()) {
+            TextView heading = label("参考来源", 11, MUTED, true);
+            heading.setPadding(dp(3), dp(8), 0, dp(3));
+            body.addView(heading);
+            for (String line : message.sources.split("\n")) {
+                int at = line.indexOf("http://");
+                if (at < 0) at = line.indexOf("https://");
+                if (at < 0) continue;
+                String url = line.substring(at).trim();
+                String title = line.substring(0, at).replaceFirst("^\\d+\\.\\s*", "").replace("·", "").trim();
+                if (title.isEmpty()) title = Uri.parse(url).getHost();
+                TextView source = label("↗  " + title, 12, BLUE, true);
+                source.setMaxLines(2);
+                source.setEllipsize(TextUtils.TruncateAt.END);
+                source.setPadding(dp(10), dp(8), dp(10), dp(8));
+                source.setBackground(pressable(box(MINT, 10, BORDER, 1)));
+                LinearLayout.LayoutParams sourceParams = new LinearLayout.LayoutParams(-1, -2);
+                sourceParams.bottomMargin = dp(4);
+                body.addView(source, sourceParams);
+                source.setOnClickListener(v -> {
+                    try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); }
+                    catch (Exception e) { Toast.makeText(this, "无法打开来源链接", Toast.LENGTH_SHORT).show(); }
+                });
+            }
+        }
         if (message.id == -1) return;
         LinearLayout actions = new LinearLayout(this);
         actions.setPadding(0, dp(7), 0, 0);
@@ -774,8 +832,9 @@ public final class MainActivity extends Activity {
         items.setOrientation(LinearLayout.VERTICAL);
         scroll.addView(items);
         String[] names = {"选择模型", "编辑系统提示词", "压缩上下文", "查看压缩摘要",
-                "重命名会话", "分享会话文本", "清空当前会话", "API Key 设置"};
-        String[] marks = {"◈", "✎", "▦", "☷", "✎", "↗", "⌫", "⚙"};
+                "重命名会话", "分享会话文本", "清空当前会话", "API Key 设置",
+                "导出全部会话", "导入会话备份", "远端文件管理"};
+        String[] marks = {"◈", "✎", "▦", "☷", "✎", "↗", "⌫", "⚙", "⇧", "⇩", "▤"};
         for (int i = 0; i < names.length; i++) {
             final int action = i;
             LinearLayout item = new LinearLayout(this);
@@ -805,6 +864,9 @@ public final class MainActivity extends Activity {
                     case 5: shareChat(); break;
                     case 6: clearChat(); break;
                     case 7: showSettings(); break;
+                    case 8: chooseBackupExport(); break;
+                    case 9: chooseBackupImport(); break;
+                    case 10: showRemoteFiles(); break;
                     default: break;
                 }
             });
@@ -908,6 +970,7 @@ public final class MainActivity extends Activity {
     }
 
     private void deleteChat(long chatId, Runnable refresh) {
+        if (archiveBusy) { Toast.makeText(this, "请等备份操作结束", Toast.LENGTH_SHORT).show(); return; }
         if (busy && busyChatId == chatId) {
             Toast.makeText(this, "请等当前回答结束后再删除", Toast.LENGTH_SHORT).show();
             return;
@@ -926,6 +989,7 @@ public final class MainActivity extends Activity {
     }
 
     private void clearChat() {
+        if (archiveBusy) { Toast.makeText(this, "请等备份操作结束", Toast.LENGTH_SHORT).show(); return; }
         if (busy && busyChatId == currentId) {
             Toast.makeText(this, "请等当前回答结束后再清空", Toast.LENGTH_SHORT).show();
             return;
@@ -1033,6 +1097,7 @@ public final class MainActivity extends Activity {
     }
 
     private void newChat() {
+        if (archiveBusy) { Toast.makeText(this, "请等备份操作结束", Toast.LENGTH_SHORT).show(); return; }
         discardPendingImage();
         discardPendingFile();
         currentId = store.createChat();
@@ -1054,18 +1119,33 @@ public final class MainActivity extends Activity {
     }
 
     private void send() {
-        if (busy) return;
+        if (busy || archiveBusy) return;
         if (imageLoading || fileLoading) {
             Toast.makeText(this, "请等附件处理完成", Toast.LENGTH_SHORT).show();
             return;
         }
         String question = composer.getText().toString().trim();
-        if (question.isEmpty() && pendingImagePath == null && pendingFilePath == null) return;
+        if (question.isEmpty() && pendingImagePath == null && pendingFilePath == null &&
+                extraImages.isEmpty() && extraFiles.isEmpty()) return;
         if (keyOrPrompt() == null) return;
-        if (question.isEmpty()) question = pendingFilePath == null ? "请描述这张图片。" : "请总结这份文档。";
-        store.addMessage(currentId, "user", question, pendingImagePath, pendingFilePath);
+        if (question.isEmpty()) question = pendingFilePath == null && extraFiles.isEmpty() ?
+                "请描述这些图片。" : "请总结这些文档。";
+        JSONArray attachments = new JSONArray();
+        try {
+            for (String path : extraImages)
+                attachments.put(new JSONObject().put("type", "image").put("path", path));
+            for (String path : extraFiles)
+                attachments.put(new JSONObject().put("type", "file").put("path", path));
+        } catch (Exception e) {
+            Toast.makeText(this, "附件处理失败，请重试", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        store.addMessage(currentId, "user", question, pendingImagePath, pendingFilePath,
+                attachments.length() == 0 ? null : attachments.toString());
         pendingImagePath = null;
         pendingFilePath = null;
+        extraImages.clear();
+        extraFiles.clear();
         updatePendingImage();
         updatePendingFile();
         composer.setText("");
@@ -1088,7 +1168,7 @@ public final class MainActivity extends Activity {
     }
 
     private void runRequest(boolean manualCompression) {
-        if (busy) return;
+        if (busy || archiveBusy) return;
         String apiKey = keyOrPrompt();
         if (apiKey == null) return;
         ConversationStore.Conversation selectedChat = store.getChat(currentId);
@@ -1128,15 +1208,28 @@ public final class MainActivity extends Activity {
         renderChat(!manualCompression);
 
         worker.execute(() -> {
-            DeepSeekClient.DocumentResolver documents = message -> {
-                if (message.fileId != null && !message.fileId.isEmpty()) return message.fileId;
+            DeepSeekClient.DocumentResolver documents = (message, path, extraIndex) -> {
+                if (extraIndex < 0 && message.fileId != null && !message.fileId.isEmpty()) return message.fileId;
+                JSONArray extras = ConversationStore.extras(message);
+                if (extraIndex >= 0) {
+                    JSONObject item = extras.optJSONObject(extraIndex);
+                    if (item != null && item.optString("file_id", "").startsWith("file-api-"))
+                        return item.optString("file_id");
+                }
                 runOnUiThread(() -> {
                     progressText = "正在上传并解析文档…";
                     if (!isDestroyed() && currentId == targetId) renderChat(false);
                 });
-                String id = DeepSeekClient.uploadFile(apiKey, message.filePath, control);
-                message.fileId = id;
-                store.setFileId(message.id, id);
+                String id = DeepSeekClient.uploadFile(apiKey, path, control);
+                if (extraIndex < 0) {
+                    message.fileId = id;
+                    store.setFileId(message.id, id);
+                } else {
+                    JSONObject item = extras.getJSONObject(extraIndex);
+                    item.put("file_id", id);
+                    message.extraAttachments = extras.toString();
+                    store.setExtraAttachments(message.id, message.extraAttachments);
+                }
                 return id;
             };
             String summary = chat.summary;
@@ -1178,7 +1271,11 @@ public final class MainActivity extends Activity {
                                         }
                                     }
                                 });
-                            });
+                            }, status -> runOnUiThread(() -> {
+                                if (isDestroyed() || !busy || busyChatId != targetId) return;
+                                progressText = status;
+                                if (currentId == targetId) renderChat(false);
+                            }));
                 }
             } catch (Exception e) {
                 failure = friendlyError(e);
@@ -1235,7 +1332,8 @@ public final class MainActivity extends Activity {
     private boolean hasActiveAttachment(List<ConversationStore.Message> all, long untilId) {
         for (ConversationStore.Message message : all) {
             if (message.id > untilId && ((message.imagePath != null &&
-                    !message.imagePath.isEmpty()) || message.filePath != null)) return true;
+                    !message.imagePath.isEmpty()) || message.filePath != null ||
+                    ConversationStore.extras(message).length() > 0)) return true;
         }
         return false;
     }
@@ -1269,6 +1367,7 @@ public final class MainActivity extends Activity {
     private void pickImage() {
         Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
         intent.setType("image/*");
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         try {
             startActivityForResult(Intent.createChooser(intent, "选择要发送的图片"), IMAGE_REQUEST);
@@ -1280,6 +1379,7 @@ public final class MainActivity extends Activity {
     private void pickFile() {
         Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
         intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         try {
             startActivityForResult(Intent.createChooser(intent, "选择文档"), FILE_REQUEST);
@@ -1288,11 +1388,88 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void chooseBackupExport() {
+        if (busy || archiveBusy) { Toast.makeText(this, "请等当前操作结束", Toast.LENGTH_SHORT).show(); return; }
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.setType("application/zip");
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.putExtra(Intent.EXTRA_TITLE, "像素鲸语-会话备份.zip");
+        startActivityForResult(intent, EXPORT_REQUEST);
+    }
+
+    private void chooseBackupImport() {
+        if (busy || archiveBusy) { Toast.makeText(this, "请等当前操作结束", Toast.LENGTH_SHORT).show(); return; }
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.setType("application/zip");
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        startActivityForResult(intent, IMPORT_REQUEST);
+    }
+
+    private void showRemoteFiles() {
+        if (busy || archiveBusy) {
+            Toast.makeText(this, "请等当前操作结束", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        String apiKey = keyOrPrompt();
+        if (apiKey == null) return;
+        Toast.makeText(this, "正在读取远端文件…", Toast.LENGTH_SHORT).show();
+        imageWorker.execute(() -> {
+            JSONArray files = null;
+            String error = null;
+            try { files = DeepSeekClient.listFiles(apiKey); }
+            catch (Exception e) { error = friendlyError(e); }
+            JSONArray result = files;
+            String failure = error;
+            runOnUiThread(() -> {
+                if (isDestroyed()) return;
+                if (failure != null) { Toast.makeText(this, failure, Toast.LENGTH_LONG).show(); return; }
+                if (result == null || result.length() == 0) {
+                    new AlertDialog.Builder(this).setTitle("远端文件")
+                            .setMessage("当前 DeepSeek 账户没有已上传的文件。")
+                            .setPositiveButton("关闭", null).show();
+                    return;
+                }
+                String[] names = new String[result.length()];
+                for (int i = 0; i < names.length; i++) {
+                    JSONObject file = result.optJSONObject(i);
+                    names[i] = file == null ? "未知文件" : file.optString("filename", "未命名文件") +
+                            "  ·  " + (file.optLong("bytes") / 1024) + " KB";
+                }
+                new AlertDialog.Builder(this)
+                        .setTitle("账户远端文件 · 最近 " + result.length() + " 项")
+                        .setItems(names, (dialog, index) -> {
+                            JSONObject file = result.optJSONObject(index);
+                            if (file == null) return;
+                            String id = file.optString("id", "");
+                            new AlertDialog.Builder(this).setTitle("删除远端文件？")
+                                    .setMessage(file.optString("filename", id) +
+                                            "\n删除后，其他客户端也无法继续引用这个文件。")
+                                    .setPositiveButton("删除", (d, which) -> imageWorker.execute(() -> {
+                                        String problem = null;
+                                        try {
+                                            DeepSeekClient.deleteFile(apiKey, id);
+                                            store.forgetRemoteFile(id);
+                                        } catch (Exception e) { problem = friendlyError(e); }
+                                        String finalProblem = problem;
+                                        runOnUiThread(() -> {
+                                            if (isDestroyed()) return;
+                                            Toast.makeText(this, finalProblem == null ?
+                                                    "远端文件已删除" : finalProblem, Toast.LENGTH_LONG).show();
+                                            if (finalProblem == null) showRemoteFiles();
+                                        });
+                                    }))
+                                    .setNegativeButton("取消", null).show();
+                        }).setNegativeButton("关闭", null).show();
+            });
+        });
+    }
+
     private void updatePendingImage() {
-        boolean visible = imageLoading || pendingImagePath != null;
+        boolean visible = imageLoading || pendingImagePath != null || !extraImages.isEmpty();
         pendingImageRow.setVisibility(visible ? View.VISIBLE : View.GONE);
         if (!visible) return;
-        pendingImageLabel.setText(imageLoading ? "正在处理图片…" : "图片已准备 · 可输入问题");
+        pendingImageLabel.setText(imageLoading ? "正在处理图片…" :
+                "已选 " + (extraImages.size() + (pendingImagePath == null ? 0 : 1)) + " 张图片 · 可继续添加");
         if (imageLoading || pendingImagePath == null) {
             pendingImagePreview.setImageDrawable(null);
         } else {
@@ -1306,11 +1483,17 @@ public final class MainActivity extends Activity {
         pendingImagePath = null;
         imageLoading = false;
         if (previous != null) ImageStore.delete(previous);
+        for (String path : extraImages) ImageStore.delete(path);
+        extraImages.clear();
         if (pendingImageRow != null) updatePendingImage();
     }
 
     private void discardPendingFile() {
+        fileSelectionId++;
+        fileLoading = false;
         FileStore.delete(pendingFilePath);
+        for (String path : extraFiles) FileStore.delete(path);
+        extraFiles.clear();
         pendingFilePath = null;
         updatePendingFile();
     }
@@ -1376,54 +1559,105 @@ public final class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == FILE_REQUEST && resultCode == RESULT_OK && data != null && data.getData() != null) {
+        if ((requestCode == EXPORT_REQUEST || requestCode == IMPORT_REQUEST) &&
+                resultCode == RESULT_OK && data != null && data.getData() != null) {
             Uri uri = data.getData();
-            fileLoading = true;
-            pendingFileLabel.setText("正在处理文档…");
-            pendingFileLabel.setVisibility(View.VISIBLE);
+            boolean exporting = requestCode == EXPORT_REQUEST;
+            archiveBusy = true;
+            Toast.makeText(this, exporting ? "正在导出会话…" : "正在导入会话…", Toast.LENGTH_SHORT).show();
             imageWorker.execute(() -> {
-                String saved = null;
-                String failure = null;
-                try { saved = FileStore.save(getApplicationContext(), uri); }
-                catch (Exception e) { failure = e.getMessage(); }
-                String result = saved;
-                String error = failure;
+                String error = null;
+                long importedId = -1;
+                try {
+                    if (exporting) {
+                        try (OutputStream out = getContentResolver().openOutputStream(uri)) {
+                            if (out == null) throw new Exception("无法写入备份文件。" );
+                            ConversationBackup.exportArchive(store, out);
+                        }
+                    } else {
+                        try (InputStream in = getContentResolver().openInputStream(uri)) {
+                            if (in == null) throw new Exception("无法读取备份文件。" );
+                            importedId = ConversationBackup.importArchive(getApplicationContext(), store, in);
+                        }
+                    }
+                } catch (Exception e) { error = e.getMessage(); }
+                String finalError = error;
+                long finalId = importedId;
                 runOnUiThread(() -> {
-                    if (isDestroyed()) { FileStore.delete(result); return; }
-                    fileLoading = false;
-                    if (result != null) {
-                        FileStore.delete(pendingFilePath);
-                        pendingFilePath = result;
-                        updatePendingFile();
-                    } else Toast.makeText(this, error == null ? "文档处理失败" : error, Toast.LENGTH_LONG).show();
+                    if (isDestroyed()) return;
+                    archiveBusy = false;
+                    if (finalError == null) {
+                        if (!exporting && finalId > 0) {
+                            discardPendingImage();
+                            discardPendingFile();
+                            currentId = finalId;
+                            store.selectChat(finalId);
+                            renderChat(true);
+                        }
+                        Toast.makeText(this, exporting ? "会话备份已导出" : "会话已导入", Toast.LENGTH_LONG).show();
+                    } else Toast.makeText(this, finalError, Toast.LENGTH_LONG).show();
                 });
             });
         }
-        if (requestCode == IMAGE_REQUEST && resultCode == RESULT_OK && data != null &&
-                data.getData() != null) {
-            Uri uri = data.getData();
+        if (requestCode == FILE_REQUEST && resultCode == RESULT_OK && data != null) {
+            List<Uri> uris = selectedUris(data);
+            if (uris.isEmpty()) return;
+            if (uris.size() + extraFiles.size() + (pendingFilePath == null ? 0 : 1) > 20) {
+                Toast.makeText(this, "一条消息最多添加 20 份文档", Toast.LENGTH_LONG).show(); return;
+            }
+            fileLoading = true;
+            int selection = ++fileSelectionId;
+            pendingFileLabel.setText("正在处理文档…");
+            pendingFileLabel.setVisibility(View.VISIBLE);
+            imageWorker.execute(() -> {
+                List<String> saved = new ArrayList<>();
+                String failure = null;
+                try { for (Uri uri : uris) saved.add(FileStore.save(getApplicationContext(), uri)); }
+                catch (Exception e) { failure = e.getMessage(); }
+                String error = failure;
+                runOnUiThread(() -> {
+                    if (isDestroyed() || selection != fileSelectionId) {
+                        for (String path : saved) FileStore.delete(path);
+                        return;
+                    }
+                    fileLoading = false;
+                    for (String path : saved) {
+                        if (pendingFilePath != null) extraFiles.add(pendingFilePath);
+                        pendingFilePath = path;
+                    }
+                    updatePendingFile();
+                    if (error != null) Toast.makeText(this, error, Toast.LENGTH_LONG).show();
+                });
+            });
+        }
+        if (requestCode == IMAGE_REQUEST && resultCode == RESULT_OK && data != null) {
+            List<Uri> uris = selectedUris(data);
+            if (uris.isEmpty()) return;
+            if (uris.size() + extraImages.size() + (pendingImagePath == null ? 0 : 1) > 20) {
+                Toast.makeText(this, "一条消息最多添加 20 张图片", Toast.LENGTH_LONG).show(); return;
+            }
             int selection = ++imageSelectionId;
             imageLoading = true;
             updatePendingImage();
             imageWorker.execute(() -> {
-                String saved = null;
+                List<String> saved = new ArrayList<>();
                 String failure = null;
                 try {
-                    saved = ImageStore.saveFromUri(getApplicationContext(), uri);
+                    for (Uri uri : uris) saved.add(ImageStore.saveFromUri(getApplicationContext(), uri));
                 } catch (Exception e) {
                     failure = e.getMessage() == null ? "图片处理失败，请重试。" : e.getMessage();
                 }
-                String finalSaved = saved;
                 String finalFailure = failure;
                 runOnUiThread(() -> {
                     if (isDestroyed() || selection != imageSelectionId) {
-                        ImageStore.delete(finalSaved);
+                        for (String path : saved) ImageStore.delete(path);
                         return;
                     }
-                    if (finalSaved != null) {
-                        ImageStore.delete(pendingImagePath);
-                        pendingImagePath = finalSaved;
-                    } else {
+                    for (String path : saved) {
+                        if (pendingImagePath != null) extraImages.add(pendingImagePath);
+                        pendingImagePath = path;
+                    }
+                    if (finalFailure != null) {
                         Toast.makeText(this, finalFailure, Toast.LENGTH_LONG).show();
                     }
                     imageLoading = false;
@@ -1431,6 +1665,17 @@ public final class MainActivity extends Activity {
                 });
             });
         }
+    }
+
+    private List<Uri> selectedUris(Intent data) {
+        List<Uri> result = new ArrayList<>();
+        ClipData clip = data.getClipData();
+        if (clip != null) for (int i = 0; i < clip.getItemCount(); i++) {
+            Uri uri = clip.getItemAt(i).getUri();
+            if (uri != null) result.add(uri);
+        }
+        if (result.isEmpty() && data.getData() != null) result.add(data.getData());
+        return result;
     }
 
     @Override protected void onDestroy() {
