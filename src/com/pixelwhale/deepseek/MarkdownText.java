@@ -1,6 +1,5 @@
 package com.pixelwhale.deepseek;
 
-import android.graphics.Color;
 import android.graphics.Typeface;
 import android.text.Spannable;
 import android.text.SpannableStringBuilder;
@@ -9,42 +8,82 @@ import android.text.style.RelativeSizeSpan;
 import android.text.style.StyleSpan;
 import android.text.style.TypefaceSpan;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 /** Small on-device formatter for common Markdown in API replies. */
 final class MarkdownText {
+    private static final Pattern FENCE = Pattern.compile("^ {0,3}(`{3,}|~{3,})(.*)$");
+    private static final int CODE_TINT = 0xfff0e9de;
+
+    static final class Block {
+        final String text;
+        final String language;
+
+        Block(String text, String language) {
+            this.text = text;
+            this.language = language;
+        }
+    }
+
+    static List<Block> blocks(String source) {
+        List<Block> result = new ArrayList<>();
+        StringBuilder text = new StringBuilder();
+        String fence = null;
+        String language = null;
+        for (String line : source.replace("\r\n", "\n").split("\n", -1)) {
+            Matcher match = FENCE.matcher(line);
+            if (match.matches()) {
+                String marker = match.group(1);
+                if (fence == null) {
+                    if (text.length() > 0) result.add(new Block(text.toString().trim(), null));
+                    text.setLength(0);
+                    fence = marker;
+                    language = match.group(2).trim();
+                    continue;
+                }
+                if (marker.charAt(0) == fence.charAt(0) && marker.length() >= fence.length()
+                        && match.group(2).trim().isEmpty()) {
+                    result.add(new Block(codeText(text), language));
+                    text.setLength(0);
+                    fence = null;
+                    language = null;
+                    continue;
+                }
+            }
+            text.append(line).append('\n');
+        }
+        if (fence != null) result.add(new Block(codeText(text), language));
+        else if (text.length() > 0) result.add(new Block(text.toString().trim(), null));
+        return result;
+    }
+
+    private static String codeText(StringBuilder text) {
+        return text.length() == 0 ? "" : text.substring(0, text.length() - 1);
+    }
+
     static SpannableStringBuilder render(String source) {
         SpannableStringBuilder result = new SpannableStringBuilder();
         String[] lines = source.split("\n", -1);
-        boolean code = false;
         for (int lineIndex = 0; lineIndex < lines.length; lineIndex++) {
             String line = lines[lineIndex];
-            if (line.trim().startsWith("```")) {
-                code = !code;
-                continue;
-            }
             int heading = 0;
-            if (!code) {
-                while (heading < line.length() && heading < 3 && line.charAt(heading) == '#')
-                    heading++;
-                if (heading > 0 && heading < line.length() && line.charAt(heading) == ' ')
-                    line = line.substring(heading + 1);
-                else heading = 0;
-                if (line.startsWith("- ") || line.startsWith("* "))
-                    line = "• " + line.substring(2);
-            }
+            while (heading < line.length() && heading < 6 && line.charAt(heading) == '#')
+                heading++;
+            if (heading > 0 && heading < line.length() && line.charAt(heading) == ' ')
+                line = line.substring(heading + 1);
+            else heading = 0;
+            if (line.startsWith("- ") || line.startsWith("* "))
+                line = "• " + line.substring(2);
             int start = result.length();
-            if (code) result.append(line);
-            else appendInline(result, line);
+            appendInline(result, line);
             int end = result.length();
             if (heading > 0 && end > start) {
                 result.setSpan(new StyleSpan(Typeface.BOLD), start, end,
                         Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
-                result.setSpan(new RelativeSizeSpan(heading == 1 ? 1.25f : 1.1f), start, end,
-                        Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
-            }
-            if (code && end > start) {
-                result.setSpan(new TypefaceSpan("monospace"), start, end,
-                        Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
-                result.setSpan(new BackgroundColorSpan(Color.rgb(233, 243, 245)), start, end,
+                result.setSpan(new RelativeSizeSpan(heading == 1 ? 1.24f : 1.1f), start, end,
                         Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
             }
             if (lineIndex < lines.length - 1) result.append('\n');
@@ -73,7 +112,7 @@ final class MarkdownText {
                     result.append(line.substring(i + 1, end));
                     result.setSpan(new TypefaceSpan("monospace"), start, result.length(),
                             Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
-                    result.setSpan(new BackgroundColorSpan(Color.rgb(233, 243, 245)),
+                    result.setSpan(new BackgroundColorSpan(CODE_TINT),
                             start, result.length(), Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
                     i = end + 1;
                     continue;

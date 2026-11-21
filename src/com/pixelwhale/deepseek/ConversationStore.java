@@ -7,6 +7,10 @@ import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.util.UUID;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.HashMap;
@@ -31,9 +35,10 @@ final class ConversationStore extends SQLiteOpenHelper {
         final long updatedAt;
         final String preview;
         final boolean webEnabled;
+        final boolean pinned;
 
         Conversation(long id, String title, String model, String systemPrompt, String summary,
-                     long summaryUntilId, long updatedAt, String preview, boolean webEnabled) {
+                     long summaryUntilId, long updatedAt, String preview, boolean webEnabled, boolean pinned) {
             this.id = id;
             this.title = title;
             this.model = model;
@@ -43,6 +48,7 @@ final class ConversationStore extends SQLiteOpenHelper {
             this.updatedAt = updatedAt;
             this.preview = preview;
             this.webEnabled = webEnabled;
+            this.pinned = pinned;
         }
     }
 
@@ -54,6 +60,7 @@ final class ConversationStore extends SQLiteOpenHelper {
         final String filePath;
         String fileId;
         final String serverToolCalls;
+        final String reasoningContent;
         final String sources;
         String extraAttachments;
 
@@ -62,15 +69,15 @@ final class ConversationStore extends SQLiteOpenHelper {
         }
 
         Message(long id, String role, String content, String imagePath) {
-            this(id, role, content, imagePath, null, null, null, null, null);
+            this(id, role, content, imagePath, null, null, null, null, null, null);
         }
 
         Message(long id, String role, String content, String imagePath, String filePath, String fileId) {
-            this(id, role, content, imagePath, filePath, fileId, null, null, null);
+            this(id, role, content, imagePath, filePath, fileId, null, null, null, null);
         }
 
         Message(long id, String role, String content, String imagePath, String filePath, String fileId,
-                String serverToolCalls, String sources, String extraAttachments) {
+                String serverToolCalls, String sources, String extraAttachments, String reasoningContent) {
             this.id = id;
             this.role = role;
             this.content = content;
@@ -78,6 +85,7 @@ final class ConversationStore extends SQLiteOpenHelper {
             this.filePath = filePath;
             this.fileId = fileId;
             this.serverToolCalls = serverToolCalls;
+            this.reasoningContent = reasoningContent;
             this.sources = sources;
             this.extraAttachments = extraAttachments;
         }
@@ -87,7 +95,7 @@ final class ConversationStore extends SQLiteOpenHelper {
     private final SharedPreferences ui;
 
     ConversationStore(Context context) {
-        super(context.getApplicationContext(), "pixel_whale.db", null, 8);
+        super(context.getApplicationContext(), "pixel_whale.db", null, 9);
         app = context.getApplicationContext();
         ImageStore.init(app);
         FileStore.init(app);
@@ -100,11 +108,11 @@ final class ConversationStore extends SQLiteOpenHelper {
                 "title TEXT NOT NULL, model TEXT NOT NULL, system_prompt TEXT NOT NULL DEFAULT '', " +
                 "summary TEXT NOT NULL DEFAULT '', " +
                 "summary_until_id INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, " +
-                "web_enabled INTEGER NOT NULL DEFAULT 0)");
+                "web_enabled INTEGER NOT NULL DEFAULT 0, pinned INTEGER NOT NULL DEFAULT 0)");
         db.execSQL("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, " +
                 "chat_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, " +
                 "image_path TEXT, file_path TEXT, file_id TEXT, server_tool_calls TEXT, sources TEXT, " +
-                "extra_attachments TEXT, created_at INTEGER NOT NULL)");
+                "extra_attachments TEXT, reasoning_content TEXT, created_at INTEGER NOT NULL)");
         db.execSQL("CREATE INDEX messages_chat_id ON messages(chat_id, id)");
     }
 
@@ -126,6 +134,10 @@ final class ConversationStore extends SQLiteOpenHelper {
         if (oldVersion < 6) db.execSQL("ALTER TABLE messages ADD COLUMN sources TEXT");
         if (oldVersion < 7) db.execSQL("ALTER TABLE chats ADD COLUMN web_enabled INTEGER NOT NULL DEFAULT 0");
         if (oldVersion < 8) db.execSQL("ALTER TABLE messages ADD COLUMN extra_attachments TEXT");
+        if (oldVersion < 9) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN reasoning_content TEXT");
+            db.execSQL("ALTER TABLE chats ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0");
+        }
     }
 
     private void migrateLegacy() {
@@ -195,7 +207,7 @@ final class ConversationStore extends SQLiteOpenHelper {
             String needle = "%" + trimmed + "%";
             args = new String[]{needle, needle};
         }
-        sql += " ORDER BY c.updated_at DESC, c.id DESC";
+        sql += " ORDER BY c.pinned DESC, c.updated_at DESC, c.id DESC";
         try (Cursor cursor = getReadableDatabase().rawQuery(sql, args)) {
             while (cursor.moveToNext()) result.add(readChat(cursor));
         }
@@ -205,24 +217,24 @@ final class ConversationStore extends SQLiteOpenHelper {
     private String chatSelect() {
         return "SELECT c.id,c.title,c.model,c.system_prompt,c.summary,c.summary_until_id,c.updated_at," +
                 "COALESCE((SELECT content FROM messages WHERE chat_id=c.id ORDER BY id DESC LIMIT 1),'')," +
-                "c.web_enabled " +
+                "c.web_enabled,c.pinned " +
                 "FROM chats c";
     }
 
     private Conversation readChat(Cursor cursor) {
         return new Conversation(cursor.getLong(0), cursor.getString(1), cursor.getString(2),
                 cursor.getString(3), cursor.getString(4), cursor.getLong(5),
-                cursor.getLong(6), cursor.getString(7), cursor.getInt(8) != 0);
+                cursor.getLong(6), cursor.getString(7), cursor.getInt(8) != 0, cursor.getInt(9) != 0);
     }
 
     List<Message> messages(long chatId) {
         List<Message> result = new ArrayList<>();
         try (Cursor cursor = getReadableDatabase().rawQuery(
-                "SELECT id,role,content,image_path,file_path,file_id,server_tool_calls,sources,extra_attachments FROM messages WHERE chat_id=? ORDER BY id",
+                "SELECT id,role,content,image_path,file_path,file_id,server_tool_calls,sources,extra_attachments,reasoning_content FROM messages WHERE chat_id=? ORDER BY id",
                 new String[]{String.valueOf(chatId)})) {
             while (cursor.moveToNext()) {
                 result.add(new Message(cursor.getLong(0), cursor.getString(1),
-                        cursor.getString(2), cursor.getString(3), cursor.getString(4), cursor.getString(5), cursor.getString(6), cursor.getString(7), cursor.getString(8)));
+                        cursor.getString(2), cursor.getString(3), cursor.getString(4), cursor.getString(5), cursor.getString(6), cursor.getString(7), cursor.getString(8), cursor.getString(9)));
             }
         }
         return result;
@@ -232,19 +244,29 @@ final class ConversationStore extends SQLiteOpenHelper {
         return addMessage(chatId, role, content, null);
     }
 
-    long addAssistantWithTools(long chatId, String content, String toolCalls, String sources) {
-        long id = addMessage(chatId, "assistant", content);
-        if (toolCalls != null) {
-            ContentValues values = new ContentValues();
-            values.put("server_tool_calls", toolCalls);
-            getWritableDatabase().update("messages", values, "id=?", new String[]{String.valueOf(id)});
+    void saveReply(long chatId, long replacedId, DeepSeekClient.Reply reply) {
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            long now = System.currentTimeMillis();
+            ContentValues message = new ContentValues();
+            message.put("chat_id", chatId);
+            message.put("role", "assistant");
+            message.put("content", reply.text);
+            message.put("server_tool_calls", reply.serverToolCalls);
+            message.put("sources", reply.sources);
+            message.put("reasoning_content", reply.reasoningContent);
+            message.put("created_at", now);
+            if (replacedId == 0) db.insertOrThrow("messages", null, message);
+            else db.update("messages", message, "id=? AND chat_id=?",
+                    new String[]{String.valueOf(replacedId), String.valueOf(chatId)});
+            ContentValues chat = new ContentValues();
+            chat.put("updated_at", now);
+            db.update("chats", chat, "id=?", new String[]{String.valueOf(chatId)});
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
         }
-        if (sources != null) {
-            ContentValues values = new ContentValues();
-            values.put("sources", sources);
-            getWritableDatabase().update("messages", values, "id=?", new String[]{String.valueOf(id)});
-        }
-        return id;
     }
 
     long addMessage(long chatId, String role, String content, String imagePath) {
@@ -358,13 +380,96 @@ final class ConversationStore extends SQLiteOpenHelper {
         }
     }
 
-    boolean removeLastAssistant(long chatId) {
-        List<Message> list = messages(chatId);
-        if (list.isEmpty()) return false;
-        Message last = list.get(list.size() - 1);
-        if (!"assistant".equals(last.role)) return false;
-        return getWritableDatabase().delete("messages", "id=? AND chat_id=?",
-                new String[]{String.valueOf(last.id), String.valueOf(chatId)}) == 1;
+    void setPinned(long chatId, boolean pinned) {
+        ContentValues values = new ContentValues();
+        values.put("pinned", pinned ? 1 : 0);
+        getWritableDatabase().update("chats", values, "id=?", new String[]{String.valueOf(chatId)});
+    }
+
+    String draft(long chatId) {
+        return ui.getString("draft_" + chatId, "");
+    }
+
+    void saveDraft(long chatId, String draft) {
+        SharedPreferences.Editor editor = ui.edit();
+        if (draft.isEmpty()) editor.remove("draft_" + chatId);
+        else editor.putString("draft_" + chatId, draft);
+        editor.apply();
+    }
+
+    long branch(long chatId, long throughId, String editedText) throws Exception {
+        SQLiteDatabase db = getWritableDatabase();
+        List<File> copied = new ArrayList<>();
+        try {
+            db.beginTransaction();
+            try {
+                Conversation source = getChat(chatId);
+                if (source == null) throw new IllegalArgumentException("会话不存在");
+                ContentValues chat = new ContentValues();
+                chat.put("title", "分支 · " + source.title);
+                chat.put("model", source.model);
+                chat.put("system_prompt", source.systemPrompt);
+                chat.put("web_enabled", source.webEnabled ? 1 : 0);
+                chat.put("updated_at", System.currentTimeMillis());
+                long branchId = db.insertOrThrow("chats", null, chat);
+                long newBoundary = 0;
+                boolean found = false;
+                for (Message message : messages(chatId)) {
+                    boolean last = message.id == throughId;
+                    ContentValues row = new ContentValues();
+                    row.put("chat_id", branchId);
+                    row.put("role", message.role);
+                    row.put("content", last && editedText != null ? editedText : message.content);
+                    row.put("image_path", copyAttachment(message.imagePath, true, copied));
+                    row.put("file_path", copyAttachment(message.filePath, false, copied));
+                    row.put("file_id", message.fileId);
+                    row.put("server_tool_calls", message.serverToolCalls);
+                    row.put("reasoning_content", message.reasoningContent);
+                    row.put("sources", message.sources);
+                    JSONArray extras = extras(message);
+                    for (int i = 0; i < extras.length(); i++) {
+                        JSONObject item = extras.getJSONObject(i);
+                        item.put("path", copyAttachment(item.getString("path"),
+                                "image".equals(item.optString("type")), copied));
+                    }
+                    if (extras.length() > 0) row.put("extra_attachments", extras.toString());
+                    row.put("created_at", System.currentTimeMillis());
+                    long newId = db.insertOrThrow("messages", null, row);
+                    if (message.id == source.summaryUntilId && !(last && editedText != null))
+                        newBoundary = newId;
+                    if (last) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) throw new IllegalArgumentException("消息不存在");
+                if (newBoundary > 0) updateSummary(branchId, source.summary, newBoundary);
+                db.setTransactionSuccessful();
+                return branchId;
+            } finally {
+                db.endTransaction();
+            }
+        } catch (Exception failure) {
+            for (File file : copied) file.delete();
+            throw failure;
+        }
+    }
+
+    private String copyAttachment(String path, boolean image, List<File> copied) throws Exception {
+        if (path == null || path.isEmpty()) return null;
+        File directory = new File(app.getFilesDir(), image ? "images" : "documents");
+        File source = new File(path).getCanonicalFile();
+        if (!directory.getCanonicalFile().equals(source.getParentFile()) || !source.isFile())
+            throw new java.io.IOException("附件不存在");
+        File target = new File(directory, UUID.randomUUID() + (image ? ".jpg" : "__" + FileStore.name(path)));
+        copied.add(target);
+        try (FileInputStream input = new FileInputStream(source);
+             FileOutputStream output = new FileOutputStream(target)) {
+            byte[] buffer = new byte[8192];
+            int size;
+            while ((size = input.read(buffer)) != -1) output.write(buffer, 0, size);
+        }
+        return target.getAbsolutePath();
     }
 
     void updateSummary(long chatId, String summary, long untilId) {
@@ -421,6 +526,7 @@ final class ConversationStore extends SQLiteOpenHelper {
             db.endTransaction();
         }
         for (Message message : old) deleteAttachments(message);
+        saveDraft(chatId, "");
     }
 
     void delete(long chatId) {
@@ -435,5 +541,6 @@ final class ConversationStore extends SQLiteOpenHelper {
             db.endTransaction();
         }
         for (Message message : old) deleteAttachments(message);
+        saveDraft(chatId, "");
     }
 }

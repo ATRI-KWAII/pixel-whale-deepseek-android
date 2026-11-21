@@ -51,6 +51,7 @@ final class ConversationBackup {
             savedChat.put("summary_until_id", chat.summaryUntilId);
             savedChat.put("updated_at", chat.updatedAt);
             savedChat.put("web_enabled", chat.webEnabled);
+            savedChat.put("pinned", chat.pinned);
             JSONArray messages = new JSONArray();
             for (ConversationStore.Message message : store.messages(chat.id)) {
                 JSONObject saved = new JSONObject();
@@ -153,6 +154,7 @@ final class ConversationBackup {
                     values.put("summary_until_id", 0);
                     values.put("updated_at", chat.optLong("updated_at", System.currentTimeMillis()));
                     values.put("web_enabled", chat.optBoolean("web_enabled", false) ? 1 : 0);
+                    values.put("pinned", chat.optBoolean("pinned", false) ? 1 : 0);
                     long chatId = db.insertOrThrow("chats", null, values);
                     if (firstChat < 0) firstChat = chatId;
                     JSONArray messages = chat.getJSONArray("messages");

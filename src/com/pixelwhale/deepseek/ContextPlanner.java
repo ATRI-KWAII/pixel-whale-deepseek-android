@@ -7,8 +7,10 @@ import org.json.JSONObject;
 
 /** Chooses old messages to summarize while keeping the recent conversation verbatim. */
 final class ContextPlanner {
-    static final int AUTO_THRESHOLD = 10000;
-    private static final int BATCH_TARGET = 7000;
+    // The official Flash and Pro models have a 1M context window. Leave room for
+    // estimated media, tools, and generation before frequent summaries become worthwhile.
+    static final int AUTO_THRESHOLD = 256_000;
+    private static final int BATCH_TARGET = 48_000;
     private static final int KEEP_RECENT = 8;
 
     static final class Batch {
@@ -34,20 +36,41 @@ final class ContextPlanner {
         return count;
     }
 
-    static Batch nextBatch(List<ConversationStore.Message> all, long untilId) {
+    static List<ConversationStore.Message> olderTurns(List<ConversationStore.Message> all, long untilId) {
         List<ConversationStore.Message> pending = active(all, untilId);
-        if (pending.size() <= KEEP_RECENT + 1) return null;
-        int eligible = pending.size() - KEEP_RECENT;
-        List<ConversationStore.Message> segment = new ArrayList<>();
+        int firstKept = firstKeptMessage(pending, false);
+        return pending.subList(0, Math.max(0, firstKept));
+    }
+
+    static Batch nextBatch(List<ConversationStore.Message> all, long untilId, boolean keepMore) {
+        List<ConversationStore.Message> pending = active(all, untilId);
+        int firstKept = firstKeptMessage(pending, keepMore);
+        if (firstKept <= 0) return null;
+
         int budget = 0;
-        for (int i = 0; i < eligible; i++) {
-            ConversationStore.Message message = pending.get(i);
-            segment.add(message);
-            budget += cost(message);
-            if (budget >= BATCH_TARGET && segment.size() >= 2) break;
+        int end = 0;
+        for (int i = 0; i < firstKept; i++) {
+            budget += cost(pending.get(i));
+            if ("user".equals(pending.get(i + 1).role)) {
+                end = i + 1;
+                if (budget >= BATCH_TARGET) break;
+            }
         }
-        return segment.size() < 2 ? null : new Batch(segment,
-                segment.get(segment.size() - 1).id);
+        return end == 0 ? null : new Batch(new ArrayList<>(pending.subList(0, end)),
+                pending.get(end - 1).id);
+    }
+
+    private static int firstKeptMessage(List<ConversationStore.Message> pending, boolean keepMore) {
+        // Start the preserved history at a user turn. Always keep the latest
+        // question and its reply (if any), even if they alone exceed the budget.
+        int firstKept = -1;
+        for (int i = pending.size() - 1; i >= 0; i--) {
+            if ("user".equals(pending.get(i).role)) {
+                firstKept = i;
+                if (!keepMore || pending.size() - i >= KEEP_RECENT) break;
+            }
+        }
+        return firstKept;
     }
 
     private static int estimate(String value) {
@@ -64,13 +87,14 @@ final class ContextPlanner {
     private static int cost(ConversationStore.Message message) {
         int cost = estimate(message.content) + 8 +
                 (message.imagePath == null || message.imagePath.isEmpty() ? 0 : 1024) +
-                (message.filePath == null ? 0 : 2048) +
-                (message.serverToolCalls == null ? 0 : estimate(message.serverToolCalls));
+                (message.filePath == null ? 0 : 4096) +
+                (message.serverToolCalls == null ? 0 : estimate(message.serverToolCalls)) +
+                (message.reasoningContent == null ? 0 : estimate(message.reasoningContent));
         if (message.extraAttachments != null) {
             JSONArray extras = ConversationStore.extras(message);
             for (int i = 0; i < extras.length(); i++) {
                 JSONObject item = extras.optJSONObject(i);
-                if (item != null) cost += "image".equals(item.optString("type")) ? 1024 : 2048;
+                if (item != null) cost += "image".equals(item.optString("type")) ? 1024 : 4096;
             }
         }
         return cost;

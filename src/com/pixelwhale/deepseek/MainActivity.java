@@ -7,6 +7,7 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
 import android.graphics.Bitmap;
 import android.graphics.Color;
@@ -26,17 +27,16 @@ import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 import android.util.LruCache;
 
-import java.text.SimpleDateFormat;
-import java.util.Date;
 import java.util.List;
 import java.util.ArrayList;
-import java.util.Locale;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.util.concurrent.ExecutorService;
@@ -45,14 +45,14 @@ import java.io.InputStream;
 import java.io.OutputStream;
 
 public final class MainActivity extends Activity {
-    private static final int NAVY = Color.rgb(24, 59, 88);
-    private static final int BLUE = Color.rgb(38, 123, 155);
-    private static final int PALE = Color.rgb(242, 248, 247);
-    private static final int MUTED = Color.rgb(110, 137, 150);
-    private static final int WHITE = Color.WHITE;
-    private static final int BORDER = Color.rgb(204, 225, 228);
-    private static final int CORAL = Color.rgb(244, 145, 121);
-    private static final int MINT = Color.rgb(222, 244, 243);
+    private static final int INK = 0xff312b26;
+    private static final int ACCENT = 0xff8d432e;
+    private static final int PAPER = 0xfffaf7f0;
+    private static final int MUTED = 0xff6f645a;
+    private static final int SURFACE = 0xfffffdfa;
+    private static final int BORDER = 0xffe1d7ca;
+    private static final int TERRACOTTA = 0xffa94e35;
+    private static final int SAND = 0xfff0e9de;
     private static final int IMAGE_REQUEST = 18;
     private static final int FILE_REQUEST = 19;
     private static final int EXPORT_REQUEST = 20;
@@ -66,12 +66,15 @@ public final class MainActivity extends Activity {
         @Override protected int sizeOf(String key, Bitmap value) { return value.getByteCount(); }
     };
     private SecretStore secrets;
+    private MemoryStore memories;
+    private boolean keyConfigured;
     private ConversationStore store;
     private long currentId;
     private long busyChatId = -1;
+    private long regeneratingId;
     private long errorChatId = -1;
     private boolean busy;
-    private boolean errorRetryable;
+    private Runnable retryAction;
     private String partialText;
     private String progressText;
     private String errorText;
@@ -104,9 +107,15 @@ public final class MainActivity extends Activity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
-        getWindow().setNavigationBarColor(PALE);
-        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+        getWindow().setNavigationBarColor(PAPER);
+        getWindow().setStatusBarColor(PAPER);
+        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+                | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
         secrets = new SecretStore(this);
+        memories = new MemoryStore(this);
+        NightMemoryJob.sync(this);
+        try { keyConfigured = secrets.read() != null; }
+        catch (Exception ignored) { }
         store = new ConversationStore(this);
         currentId = store.selectedChat().id;
         android.content.SharedPreferences legacySettings = getPreferences(MODE_PRIVATE);
@@ -116,81 +125,56 @@ public final class MainActivity extends Activity {
         }
         webEnabled = store.getChat(currentId).webEnabled;
         buildScreen();
+        restoreDraft();
         renderChat(true);
     }
 
     private void buildScreen() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(PALE);
+        root.setBackgroundColor(PAPER);
+        root.setFocusableInTouchMode(true);
         setContentView(root);
+        root.requestFocus();
 
-        FrameLayout headerFrame = new FrameLayout(this);
-        root.addView(headerFrame, new LinearLayout.LayoutParams(-1, dp(84)));
-        headerFrame.addView(new OceanBackdropView(this),
-                new FrameLayout.LayoutParams(-1, -1));
         LinearLayout header = new LinearLayout(this);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        header.setPadding(dp(16), dp(12), dp(16), dp(16));
-        headerFrame.addView(header, new FrameLayout.LayoutParams(-1, -1));
+        header.setPadding(dp(13), 0, dp(13), 0);
+        root.addView(header, new LinearLayout.LayoutParams(-1, dp(64)));
 
-        TextView menu = headerButton("☰", 20);
-        header.addView(menu, new LinearLayout.LayoutParams(dp(40), dp(42)));
+        TextView menu = headerButton("☰", 19);
+        menu.setContentDescription("会话历史");
+        header.addView(menu, new LinearLayout.LayoutParams(dp(44), dp(44)));
         menu.setOnClickListener(v -> showConversationList());
-
-        FrameLayout avatar = new FrameLayout(this);
-        avatar.setBackground(box(Color.rgb(225, 247, 248), 14, 0, 0));
-        avatar.setElevation(dp(2));
-        LinearLayout.LayoutParams avatarParams = new LinearLayout.LayoutParams(dp(45), dp(45));
-        avatarParams.leftMargin = dp(8);
-        header.addView(avatar, avatarParams);
-        avatar.addView(new PixelWhaleView(this), new FrameLayout.LayoutParams(-1, -1));
 
         LinearLayout heading = new LinearLayout(this);
         heading.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout.LayoutParams headingParams = new LinearLayout.LayoutParams(0, -2, 1);
-        headingParams.leftMargin = dp(12);
-        header.addView(heading, headingParams);
-        titleView = label("新对话", 18, WHITE, true);
+        heading.setPadding(dp(8), 0, dp(8), 0);
+        header.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
+        titleView = label("像素鲸语", 17, INK, true);
         titleView.setSingleLine(true);
         titleView.setEllipsize(TextUtils.TruncateAt.END);
         heading.addView(titleView);
-        TextView brand = label("PIXEL WHALE  ·  DEEPSEEK", 9,
-                Color.rgb(184, 225, 233), true);
-        brand.setLetterSpacing(0.08f);
-        heading.addView(brand);
-
-        TextView add = headerButton("＋", 24);
-        add.setBackground(pressable(box(CORAL, 12, 0, 0)));
-        header.addView(add, new LinearLayout.LayoutParams(dp(39), dp(42)));
-        add.setOnClickListener(v -> newChat());
-        TextView more = headerButton("⋯", 25);
-        LinearLayout.LayoutParams moreParams = new LinearLayout.LayoutParams(dp(39), dp(42));
-        moreParams.leftMargin = dp(3);
-        header.addView(more, moreParams);
-        more.setOnClickListener(v -> showChatMenu());
-
-        LinearLayout stripe = new LinearLayout(this);
-        stripe.setGravity(Gravity.CENTER_VERTICAL);
-        stripe.setPadding(dp(16), dp(8), dp(16), dp(7));
-        stripe.setBackgroundColor(PALE);
-        root.addView(stripe, new LinearLayout.LayoutParams(-1, dp(53)));
-        modelView = label("DEEPSEEK CHAT", 11, BLUE, true);
-        modelView.setLetterSpacing(0.03f);
-        modelView.setGravity(Gravity.CENTER_VERTICAL);
+        modelView = label("", 12, ACCENT, true);
         modelView.setSingleLine(true);
         modelView.setEllipsize(TextUtils.TruncateAt.END);
-        modelView.setPadding(dp(13), 0, dp(12), 0);
-        modelView.setBackground(pressable(box(WHITE, 12, BORDER, 1)));
-        stripe.addView(modelView, new LinearLayout.LayoutParams(0, dp(37), 1));
-        modelView.setOnClickListener(v -> showModelPicker());
-        TextView promptShortcut = label("✦ 提示词", 11, NAVY, true);
-        promptShortcut.setGravity(Gravity.CENTER);
-        promptShortcut.setBackground(pressable(box(MINT, 12, BORDER, 1)));
-        LinearLayout.LayoutParams promptParams = new LinearLayout.LayoutParams(dp(78), dp(37));
-        promptParams.leftMargin = dp(8);
-        stripe.addView(promptShortcut, promptParams);
-        promptShortcut.setOnClickListener(v -> editSystemPrompt());
+        heading.addView(modelView);
+        heading.setContentDescription("选择模型");
+        heading.setBackground(pressable(box(Color.TRANSPARENT, 10, 0, 0)));
+        heading.setOnClickListener(v -> showModelPicker());
+
+        TextView add = headerButton("＋", 23);
+        add.setContentDescription("新对话");
+        header.addView(add, new LinearLayout.LayoutParams(dp(44), dp(44)));
+        add.setOnClickListener(v -> newChat());
+        TextView more = headerButton("⋯", 24);
+        more.setContentDescription("会话设置");
+        header.addView(more, new LinearLayout.LayoutParams(dp(44), dp(44)));
+        more.setOnClickListener(v -> showChatMenu());
+
+        View divider = new View(this);
+        divider.setBackgroundColor(BORDER);
+        root.addView(divider, new LinearLayout.LayoutParams(-1, dp(1)));
 
         chatScroll = new ScrollView(this);
         chatScroll.setFillViewport(true);
@@ -199,30 +183,29 @@ public final class MainActivity extends Activity {
         root.addView(chatScroll, new LinearLayout.LayoutParams(-1, 0, 1));
         chatColumn = new LinearLayout(this);
         chatColumn.setOrientation(LinearLayout.VERTICAL);
-        chatColumn.setPadding(dp(16), dp(18), dp(16), dp(18));
+        chatColumn.setPadding(dp(20), dp(12), dp(20), dp(22));
         chatScroll.addView(chatColumn, new ScrollView.LayoutParams(-1, -2));
 
         LinearLayout bottom = new LinearLayout(this);
         bottom.setOrientation(LinearLayout.VERTICAL);
-        bottom.setPadding(dp(15), dp(8), dp(15), dp(12));
-        bottom.setBackgroundColor(PALE);
-        bottom.setElevation(dp(5));
+        bottom.setPadding(dp(16), dp(8), dp(16), dp(13));
+        bottom.setBackgroundColor(PAPER);
         root.addView(bottom, new LinearLayout.LayoutParams(-1, -2));
 
         pendingImageRow = new LinearLayout(this);
         pendingImageRow.setGravity(Gravity.CENTER_VERTICAL);
         pendingImageRow.setPadding(dp(9), dp(6), dp(9), dp(6));
-        pendingImageRow.setBackground(box(MINT, 15, BORDER, 1));
+        pendingImageRow.setBackground(box(SAND, 15, BORDER, 1));
         LinearLayout.LayoutParams pendingParams = new LinearLayout.LayoutParams(-1, dp(68));
         pendingParams.bottomMargin = dp(8);
         bottom.addView(pendingImageRow, pendingParams);
         pendingImagePreview = new ImageView(this);
         pendingImagePreview.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        pendingImagePreview.setBackground(box(Color.rgb(232, 244, 247), 8, 0, 0));
+        pendingImagePreview.setBackground(box(SAND, 8, 0, 0));
         pendingImagePreview.setClipToOutline(true);
         pendingImageRow.addView(pendingImagePreview,
                 new LinearLayout.LayoutParams(dp(55), dp(55)));
-        pendingImageLabel = label("图片已准备", 13, NAVY, true);
+        pendingImageLabel = label("图片已准备", 13, INK, true);
         LinearLayout.LayoutParams imageLabelParams = new LinearLayout.LayoutParams(0, -2, 1);
         imageLabelParams.leftMargin = dp(10);
         pendingImageRow.addView(pendingImageLabel, imageLabelParams);
@@ -232,9 +215,9 @@ public final class MainActivity extends Activity {
         removeImage.setOnClickListener(v -> discardPendingImage());
         pendingImageRow.setVisibility(View.GONE);
 
-        pendingFileLabel = label("", 12, NAVY, true);
+        pendingFileLabel = label("", 12, INK, true);
         pendingFileLabel.setPadding(dp(12), dp(9), dp(12), dp(9));
-        pendingFileLabel.setBackground(pressable(box(MINT, 12, BORDER, 1)));
+        pendingFileLabel.setBackground(pressable(box(SAND, 12, BORDER, 1)));
         LinearLayout.LayoutParams fileParams = new LinearLayout.LayoutParams(-1, -2);
         fileParams.bottomMargin = dp(7);
         bottom.addView(pendingFileLabel, fileParams);
@@ -243,69 +226,65 @@ public final class MainActivity extends Activity {
         });
         updatePendingFile();
 
-        webButton = label("", 12, BLUE, true);
-        webButton.setPadding(dp(13), dp(7), dp(13), dp(7));
-        LinearLayout.LayoutParams webParams = new LinearLayout.LayoutParams(-2, -2);
-        webParams.bottomMargin = dp(7);
-        bottom.addView(webButton, webParams);
+        LinearLayout composeCard = new LinearLayout(this);
+        composeCard.setOrientation(LinearLayout.VERTICAL);
+        composeCard.setPadding(dp(8), dp(4), dp(8), dp(6));
+        composeCard.setBackground(box(SURFACE, 20, BORDER, 1));
+        composeCard.setElevation(dp(2));
+        bottom.addView(composeCard, new LinearLayout.LayoutParams(-1, -2));
+
+        composer = new EditText(this);
+        composer.setTextSize(16);
+        composer.setTextColor(INK);
+        composer.setHintTextColor(MUTED);
+        composer.setHint("发消息给小鲸…");
+        composer.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE |
+                InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        composer.setMinLines(1);
+        composer.setMaxLines(5);
+        composer.setPadding(dp(10), dp(11), dp(10), dp(8));
+        composer.setBackgroundColor(Color.TRANSPARENT);
+        composeCard.addView(composer, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout toolbar = new LinearLayout(this);
+        toolbar.setGravity(Gravity.CENTER_VERTICAL);
+        composeCard.addView(toolbar, new LinearLayout.LayoutParams(-1, -2));
+
+        TextView attach = headerButton("＋", 22);
+        attach.setContentDescription("添加图片或文档");
+        toolbar.addView(attach, new LinearLayout.LayoutParams(dp(44), dp(44)));
+        attach.setOnClickListener(v -> new AlertDialog.Builder(this)
+                .setItems(new String[]{"添加图片", "添加文档"}, (dialog, which) -> {
+                    if (which == 0) pickImage(); else pickFile();
+                }).show());
+
+        webButton = label("", 13, ACCENT, true);
+        webButton.setGravity(Gravity.CENTER);
+        webButton.setPadding(dp(12), 0, dp(12), 0);
+        webButton.setMinimumHeight(dp(44));
+        toolbar.addView(webButton, new LinearLayout.LayoutParams(-2, -2));
         webButton.setOnClickListener(v -> {
             webEnabled = !webEnabled;
             store.setWebEnabled(currentId, webEnabled);
             updateWebButton();
         });
         updateWebButton();
+        toolbar.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
 
-        LinearLayout composeRow = new LinearLayout(this);
-        composeRow.setGravity(Gravity.CENTER_VERTICAL);
-        composeRow.setPadding(dp(6), dp(5), dp(6), dp(5));
-        composeRow.setBackground(box(WHITE, 21, BORDER, 1));
-        composeRow.setElevation(dp(3));
-        bottom.addView(composeRow, new LinearLayout.LayoutParams(-1, -2));
-
-        TextView attach = label("＋", 22, BLUE, true);
-        attach.setGravity(Gravity.CENTER);
-        attach.setBackground(pressable(box(MINT, 14, 0, 0)));
-        LinearLayout.LayoutParams attachParams = new LinearLayout.LayoutParams(dp(42), dp(42));
-        attachParams.rightMargin = dp(5);
-        composeRow.addView(attach, attachParams);
-        attach.setOnClickListener(v -> new AlertDialog.Builder(this)
-                .setItems(new String[]{"发送图片", "发送文档"}, (dialog, which) -> {
-                    if (which == 0) pickImage(); else pickFile();
-                }).show());
-
-        composer = new EditText(this);
-        composer.setTextSize(15);
-        composer.setTextColor(NAVY);
-        composer.setHintTextColor(Color.rgb(145, 166, 176));
-        composer.setHint("问问小鲸鱼…");
-        composer.setMinLines(1);
-        composer.setMaxLines(5);
-        composer.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE |
-                InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
-        composer.setPadding(dp(8), dp(8), dp(8), dp(8));
-        composer.setBackgroundColor(Color.TRANSPARENT);
-        LinearLayout.LayoutParams inputParams = new LinearLayout.LayoutParams(0, -2, 1);
-        inputParams.rightMargin = dp(3);
-        composeRow.addView(composer, inputParams);
-
-        sendButton = label("➤", 20, WHITE, true);
+        sendButton = label("↑", 24, Color.WHITE, true);
         sendButton.setGravity(Gravity.CENTER);
-        sendButton.setBackground(pressable(box(CORAL, 15, 0, 0)));
-        composeRow.addView(sendButton, new LinearLayout.LayoutParams(dp(43), dp(43)));
+        toolbar.addView(sendButton, new LinearLayout.LayoutParams(dp(44), dp(44)));
         sendButton.setOnClickListener(v -> {
-            if (busy) stopRequest();
+            if (busy && busyChatId == currentId) stopRequest();
             else send();
         });
-        TextView footnote = label("✦  图片与提问会发送至 DeepSeek  ·  会话保存在本机", 10, MUTED, false);
-        footnote.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams footParams = new LinearLayout.LayoutParams(-1, -2);
-        footParams.topMargin = dp(7);
-        bottom.addView(footnote, footParams);
     }
 
     private void updateWebButton() {
-        webButton.setText(webEnabled ? "⌕  联网搜索 · 链接读取  开" : "⌕  联网搜索 · 链接读取  关");
-        webButton.setBackground(pressable(box(webEnabled ? MINT : WHITE, 12, BORDER, 1)));
+        webButton.setText(webEnabled ? "✓ 联网" : "联网");
+        webButton.setContentDescription(webEnabled ? "联网已开启，点击关闭" : "联网已关闭，点击开启");
+        webButton.setTextColor(webEnabled ? ACCENT : MUTED);
+        webButton.setBackground(pressable(box(webEnabled ? SAND : Color.TRANSPARENT, 12, 0, 0)));
     }
 
     private void updatePendingFile() {
@@ -330,41 +309,48 @@ public final class MainActivity extends Activity {
             renderedChatId = currentId;
             scrollBottom = true;
         }
-        titleView.setText(chat.title);
-        String modelName = "pro".equals(chat.model) ? "V4 PRO · 深度思考" :
-                ("think".equals(chat.model) ? "FLASH · 深度思考" : "FLASH · 快速问答");
-        modelView.setText(("◆  " + modelName) +
-                (chat.summary.isEmpty() ? "  ·  选择模型" : "  ·  已压缩上下文"));
+        titleView.setText("新对话".equals(chat.title) ? "像素鲸语" : chat.title);
+        String modelName = "pro".equals(chat.model) ? "DeepSeek Pro · 思考" :
+                ("think".equals(chat.model) ? "DeepSeek Flash · 思考" : "DeepSeek Flash");
+        modelView.setText(modelName + "  ⌄");
         chatColumn.removeAllViews();
         streamingBubble = null;
         List<ConversationStore.Message> messages = store.messages(currentId);
+        chatColumn.setGravity(messages.isEmpty() ? Gravity.CENTER_VERTICAL : Gravity.TOP);
         if (messages.isEmpty()) addWelcome();
         else {
             if (!chat.summary.isEmpty()) addSummaryBanner(chat);
             int first = Math.max(0, messages.size() - visibleMessageCount);
             if (first > 0) addLoadOlder();
             for (int i = first; i < messages.size(); i++) {
+                if (busy && busyChatId == currentId && messages.get(i).id == regeneratingId) continue;
                 addMessage(messages.get(i), i == messages.size() - 1);
             }
         }
         if (busy && busyChatId == currentId) {
             if (partialText == null || partialText.isEmpty())
-                addStatus(progressText, false, false);
+                addStatus(progressText, false, null);
             else addMessage(new ConversationStore.Message(-1, "assistant", partialText), false);
         }
         if (errorText != null && errorChatId == currentId)
-            addStatus(errorText, true, errorRetryable);
-        sendButton.setText(busy ? "■" : "➤");
-        sendButton.setBackground(pressable(box(busy ? NAVY : CORAL, 15, 0, 0)));
-        sendButton.setAlpha(1f);
-        if (scrollBottom) chatScroll.post(() -> chatScroll.fullScroll(View.FOCUS_DOWN));
+            addStatus(errorText, true, retryAction);
+        else if (!busy && !messages.isEmpty() && "user".equals(messages.get(messages.size() - 1).role))
+            addStatus("这条消息还没有回复。", false, this::requestReply);
+        boolean stoppable = busy && busyChatId == currentId;
+        sendButton.setText(stoppable ? "■" : "↑");
+        sendButton.setTextSize(stoppable ? 16 : 24);
+        sendButton.setContentDescription(stoppable ? "停止生成" : "发送");
+        sendButton.setBackground(pressable(box(stoppable ? INK : TERRACOTTA, 13, 0, 0)));
+        sendButton.setEnabled(!archiveBusy && (!busy || stoppable));
+        sendButton.setAlpha(sendButton.isEnabled() ? 1f : .45f);
+        if (scrollBottom) scrollToBottom();
         else chatScroll.post(() -> chatScroll.scrollTo(0, oldScrollY));
     }
 
     private void addLoadOlder() {
-        TextView older = label("↑  加载更早消息", 12, BLUE, true);
+        TextView older = label("↑  加载更早消息", 12, ACCENT, true);
         older.setGravity(Gravity.CENTER);
-        older.setBackground(pressable(box(WHITE, 13, BORDER, 1)));
+        older.setBackground(pressable(box(SURFACE, 13, BORDER, 1)));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(39));
         params.bottomMargin = dp(9);
         chatColumn.addView(older, params);
@@ -382,95 +368,63 @@ public final class MainActivity extends Activity {
         LinearLayout hero = new LinearLayout(this);
         hero.setOrientation(LinearLayout.VERTICAL);
         hero.setGravity(Gravity.CENTER_HORIZONTAL);
-        hero.setPadding(dp(12), dp(12), dp(12), dp(22));
-        hero.setBackground(box(WHITE, 24, BORDER, 1));
-        hero.setElevation(dp(2));
+        hero.setPadding(dp(4), dp(24), dp(4), dp(32));
         chatColumn.addView(hero, new LinearLayout.LayoutParams(-1, -2));
 
-        FrameLayout artPanel = new FrameLayout(this);
-        artPanel.setBackground(box(MINT, 19, 0, 0));
-        artPanel.setClipToOutline(true);
-        hero.addView(artPanel, new LinearLayout.LayoutParams(-1, dp(188)));
-        OceanBackdropView sea = new OceanBackdropView(this);
-        sea.setLight(true);
-        artPanel.addView(sea, new FrameLayout.LayoutParams(-1, -1));
-        artPanel.addView(new PixelWhaleView(this), new FrameLayout.LayoutParams(-1, -1));
-        TextView artTag = label("  PIXEL WHALE  /  001  ", 9, NAVY, true);
-        artTag.setLetterSpacing(0.09f);
-        artTag.setGravity(Gravity.CENTER);
-        artTag.setBackground(box(Color.rgb(244, 252, 251), 8, 0, 0));
-        FrameLayout.LayoutParams artTagParams = new FrameLayout.LayoutParams(-2, dp(26),
-                Gravity.TOP | Gravity.LEFT);
-        artTagParams.leftMargin = dp(13);
-        artTagParams.topMargin = dp(13);
-        artPanel.addView(artTag, artTagParams);
+        ImageView emblem = new ImageView(this);
+        emblem.setImageResource(R.drawable.whale_mark);
+        emblem.setPadding(dp(11), dp(11), dp(11), dp(11));
+        emblem.setBackground(box(SAND, 19, BORDER, 1));
+        hero.addView(emblem, new LinearLayout.LayoutParams(dp(58), dp(58)));
 
-        TextView welcome = label("嗨，我是小鲸！", 24, NAVY, true);
-        LinearLayout.LayoutParams welcomeParams = new LinearLayout.LayoutParams(-2, -2);
-        welcomeParams.topMargin = dp(16);
+        TextView welcome = label("今天想聊些什么？", 28, INK, false);
+        welcome.setTypeface(Typeface.create("serif", Typeface.NORMAL));
+        welcome.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams welcomeParams = new LinearLayout.LayoutParams(-1, -2);
+        welcomeParams.topMargin = dp(18);
         hero.addView(welcome, welcomeParams);
-        TextView description = label("把想法交给海浪，我们一起找到答案。", 13, MUTED, false);
-        description.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams descriptionParams = new LinearLayout.LayoutParams(-1, -2);
-        descriptionParams.topMargin = dp(5);
-        hero.addView(description, descriptionParams);
 
-        TextView sectionTitle = label("✦  从这里出发", 14, NAVY, true);
-        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(-1, -2);
-        titleParams.topMargin = dp(23);
-        titleParams.bottomMargin = dp(9);
-        chatColumn.addView(sectionTitle, titleParams);
-        addSuggestion("01", "学习一点新东西", "用简单的话解释一个知识点");
-        addSuggestion("02", "整理我的计划", "帮我制定一周学习计划");
-        addSuggestion("03", "来点灵感", "写一段可爱的像素鲸鱼故事");
+        LinearLayout suggestions = new LinearLayout(this);
+        suggestions.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams suggestionParams = new LinearLayout.LayoutParams(-1, -2);
+        suggestionParams.topMargin = dp(24);
+        hero.addView(suggestions, suggestionParams);
+        addSuggestion(suggestions, "学一个知识点", "请用一个实际例子解释我接下来给你的知识点：");
+        addSuggestion(suggestions, "读懂一段代码", "请帮我理解下面的代码，先解释它的用途，再解释关键步骤：\n");
+        addSuggestion(suggestions, "梳理写作思路", "请帮我梳理以下写作主题的大纲：");
 
-        TextView tip = label("✦  首次使用？点右上角 ⋯ 填写 API Key", 11, BLUE, true);
-        tip.setGravity(Gravity.CENTER);
-        tip.setBackground(box(MINT, 12, 0, 0));
-        LinearLayout.LayoutParams tipParams = new LinearLayout.LayoutParams(-1, dp(38));
-        tipParams.topMargin = dp(13);
-        chatColumn.addView(tip, tipParams);
-        tip.setOnClickListener(v -> showSettings());
+        if (!keyConfigured) {
+            TextView setup = label("连接 DeepSeek API  ›", 13, ACCENT, true);
+            setup.setGravity(Gravity.CENTER);
+            setup.setMinimumHeight(dp(48));
+            hero.addView(setup, new LinearLayout.LayoutParams(-1, -2));
+            setup.setOnClickListener(v -> showSettings());
+        }
     }
 
-    private void addSuggestion(String number, String title, String prompt) {
-        LinearLayout card = new LinearLayout(this);
-        card.setGravity(Gravity.CENTER_VERTICAL);
-        card.setPadding(dp(11), dp(8), dp(12), dp(8));
-        card.setBackground(pressable(box(WHITE, 16, BORDER, 1)));
-        card.setElevation(dp(1));
-        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(-1, dp(70));
-        cardParams.bottomMargin = dp(8);
-        chatColumn.addView(card, cardParams);
-        TextView icon = label(number, 11, BLUE, true);
-        icon.setGravity(Gravity.CENTER);
-        icon.setBackground(box(MINT, 12, 0, 0));
-        card.addView(icon, new LinearLayout.LayoutParams(dp(43), dp(43)));
-        LinearLayout text = new LinearLayout(this);
-        text.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout.LayoutParams textParams = new LinearLayout.LayoutParams(0, -2, 1);
-        textParams.leftMargin = dp(12);
-        card.addView(text, textParams);
-        text.addView(label(title, 14, NAVY, true));
-        TextView detail = label(prompt, 11, MUTED, false);
-        detail.setSingleLine(true);
-        detail.setEllipsize(TextUtils.TruncateAt.END);
-        LinearLayout.LayoutParams detailParams = new LinearLayout.LayoutParams(-1, -2);
-        detailParams.topMargin = dp(3);
-        text.addView(detail, detailParams);
-        card.addView(label("↗", 19, BLUE, true));
-        card.setOnClickListener(v -> {
+    private void addSuggestion(LinearLayout parent, String title, String prompt) {
+        TextView action = label(title + "  ↗", 14, INK, true);
+        action.setGravity(Gravity.CENTER_VERTICAL);
+        action.setPadding(dp(15), dp(9), dp(15), dp(9));
+        action.setMinimumHeight(dp(48));
+        action.setBackground(pressable(box(SURFACE, 13, BORDER, 1)));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.bottomMargin = dp(8);
+        parent.addView(action, params);
+        action.setOnClickListener(v -> {
             composer.setText(prompt);
             composer.setSelection(composer.length());
             composer.requestFocus();
+            InputMethodManager keyboard = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (keyboard != null) keyboard.showSoftInput(composer, InputMethodManager.SHOW_IMPLICIT);
         });
     }
 
     private void addSummaryBanner(ConversationStore.Conversation chat) {
-        TextView banner = label("✦  较早对话已整理为摘要  ·  点击查看", 12, BLUE, true);
+        TextView banner = label("查看较早对话摘要  ›", 13, ACCENT, true);
         banner.setGravity(Gravity.CENTER_VERTICAL);
         banner.setPadding(dp(12), dp(10), dp(12), dp(10));
-        banner.setBackground(pressable(box(MINT, 13, BORDER, 1)));
+        banner.setBackground(pressable(box(SAND, 13, BORDER, 1)));
         chatColumn.addView(banner, new LinearLayout.LayoutParams(-1, -2));
         banner.setOnClickListener(v -> showSummary(chat));
     }
@@ -482,31 +436,31 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, -2);
         rowParams.topMargin = dp(17);
         chatColumn.addView(row, rowParams);
-        if (!user) {
-            FrameLayout avatar = new FrameLayout(this);
-            avatar.setBackground(box(MINT, 11, BORDER, 1));
-            avatar.setElevation(dp(1));
-            row.addView(avatar, new LinearLayout.LayoutParams(dp(35), dp(35)));
-            avatar.addView(new PixelWhaleView(this), new FrameLayout.LayoutParams(-1, -1));
-        }
         LinearLayout body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
         body.setGravity(user ? Gravity.RIGHT : Gravity.LEFT);
-        LinearLayout.LayoutParams bodyParams = new LinearLayout.LayoutParams(-2, -2);
-        bodyParams.leftMargin = user ? dp(42) : dp(9);
-        bodyParams.rightMargin = user ? 0 : dp(21);
+        LinearLayout.LayoutParams bodyParams = new LinearLayout.LayoutParams(user ? -2 : -1, -2);
+        bodyParams.leftMargin = user ? dp(38) : 0;
         row.addView(body, bodyParams);
-        TextView role = label(user ? "你" : "小鲸  ·  DEEPSEEK", 10,
-                user ? MUTED : BLUE, true);
-        role.setLetterSpacing(0.04f);
-        role.setGravity(user ? Gravity.RIGHT : Gravity.LEFT);
-        LinearLayout.LayoutParams roleParams = new LinearLayout.LayoutParams(-1, -2);
-        roleParams.bottomMargin = dp(5);
-        body.addView(role, roleParams);
+        if (!user) {
+            LinearLayout identity = new LinearLayout(this);
+            identity.setGravity(Gravity.CENTER_VERTICAL);
+            ImageView mark = new ImageView(this);
+            mark.setImageResource(R.drawable.whale_mark);
+            mark.setPadding(dp(4), dp(4), dp(4), dp(4));
+            mark.setBackground(box(SAND, 9, 0, 0));
+            identity.addView(mark, new LinearLayout.LayoutParams(dp(28), dp(28)));
+            TextView name = label("小鲸", 13, INK, true);
+            name.setPadding(dp(8), 0, 0, 0);
+            identity.addView(name);
+            LinearLayout.LayoutParams identityParams = new LinearLayout.LayoutParams(-2, -2);
+            identityParams.bottomMargin = dp(7);
+            body.addView(identity, identityParams);
+        }
         if (message.imagePath != null && !message.imagePath.isEmpty()) {
             ImageView picture = new ImageView(this);
             picture.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            picture.setBackground(box(Color.rgb(222, 240, 243), 12, 0, 0));
+            picture.setBackground(box(SAND, 12, 0, 0));
             picture.setClipToOutline(true);
             LinearLayout.LayoutParams pictureParams = new LinearLayout.LayoutParams(
                     dp(190), dp(150));
@@ -530,33 +484,36 @@ public final class MainActivity extends Activity {
             picture.setOnClickListener(v -> showFullImage(path));
         }
         if (message.filePath != null) {
-            TextView file = label("▤  " + FileStore.name(message.filePath), 12, BLUE, true);
+            TextView file = label("▤  " + FileStore.name(message.filePath), 12, ACCENT, true);
             file.setPadding(dp(10), dp(7), dp(10), dp(7));
-            file.setBackground(box(MINT, 10, BORDER, 1));
+            file.setBackground(box(SAND, 10, BORDER, 1));
             body.addView(file, new LinearLayout.LayoutParams(-2, -2));
         }
         for (int i = 0; i < extras.length(); i++) {
             JSONObject extra = extras.optJSONObject(i);
             if (extra == null || !"file".equals(extra.optString("type"))) continue;
-            TextView file = label("▤  " + FileStore.name(extra.optString("path", "")), 12, BLUE, true);
+            TextView file = label("▤  " + FileStore.name(extra.optString("path", "")), 12, ACCENT, true);
             file.setPadding(dp(10), dp(7), dp(10), dp(7));
-            file.setBackground(box(MINT, 10, BORDER, 1));
+            file.setBackground(box(SAND, 10, BORDER, 1));
             body.addView(file, new LinearLayout.LayoutParams(-2, -2));
         }
-        TextView bubble = label(message.content, 15, user ? WHITE : NAVY, false);
-        if (!user && message.id != -1) bubble.setText(MarkdownText.render(message.content));
-        if (message.id == -1) streamingBubble = bubble;
-        bubble.setTextIsSelectable(true);
-        bubble.setLineSpacing(dp(4), 1.02f);
-        bubble.setPadding(dp(15), dp(12), dp(15), dp(12));
-        GradientDrawable bubbleShape = box(user ? BLUE : WHITE, 17,
-                user ? 0 : BORDER, user ? 0 : 1);
-        bubbleShape.setCornerRadii(user
-                ? new float[]{dp(18),dp(18),dp(6),dp(6),dp(18),dp(18),dp(18),dp(18)}
-                : new float[]{dp(6),dp(6),dp(18),dp(18),dp(18),dp(18),dp(18),dp(18)});
-        bubble.setBackground(bubbleShape);
-        bubble.setElevation(dp(1));
-        body.addView(bubble, new LinearLayout.LayoutParams(-2, -2));
+        if (user || message.id == -1) {
+            TextView bubble = messageText(message.content);
+            if (user) {
+                bubble.setPadding(dp(14), dp(11), dp(14), dp(11));
+                bubble.setBackground(box(SAND, 17, 0, 0));
+            } else streamingBubble = bubble;
+            body.addView(bubble, new LinearLayout.LayoutParams(-2, -2));
+        } else {
+            for (MarkdownText.Block block : MarkdownText.blocks(message.content)) {
+                if (block.language != null) addCodeBlock(body, block);
+                else if (!block.text.isEmpty()) {
+                    TextView paragraph = messageText("");
+                    paragraph.setText(MarkdownText.render(block.text));
+                    body.addView(paragraph, new LinearLayout.LayoutParams(-1, -2));
+                }
+            }
+        }
         if (!user && message.sources != null && !message.sources.isEmpty()) {
             TextView heading = label("参考来源", 11, MUTED, true);
             heading.setPadding(dp(3), dp(8), 0, dp(3));
@@ -568,11 +525,11 @@ public final class MainActivity extends Activity {
                 String url = line.substring(at).trim();
                 String title = line.substring(0, at).replaceFirst("^\\d+\\.\\s*", "").replace("·", "").trim();
                 if (title.isEmpty()) title = Uri.parse(url).getHost();
-                TextView source = label("↗  " + title, 12, BLUE, true);
+                TextView source = label("↗  " + title, 12, ACCENT, true);
                 source.setMaxLines(2);
                 source.setEllipsize(TextUtils.TruncateAt.END);
                 source.setPadding(dp(10), dp(8), dp(10), dp(8));
-                source.setBackground(pressable(box(MINT, 10, BORDER, 1)));
+                source.setBackground(pressable(box(SAND, 10, BORDER, 1)));
                 LinearLayout.LayoutParams sourceParams = new LinearLayout.LayoutParams(-1, -2);
                 sourceParams.bottomMargin = dp(4);
                 body.addView(source, sourceParams);
@@ -584,44 +541,91 @@ public final class MainActivity extends Activity {
         }
         if (message.id == -1) return;
         LinearLayout actions = new LinearLayout(this);
-        actions.setPadding(0, dp(7), 0, 0);
+        actions.setPadding(0, dp(3), 0, 0);
         body.addView(actions, new LinearLayout.LayoutParams(-2, -2));
         TextView copy = actionChip("复制");
         actions.addView(copy);
         copy.setOnClickListener(v -> copyText(message.content));
-        if (!user && last) {
-            TextView retry = actionChip("重新生成 ↻");
-            LinearLayout.LayoutParams retryParams = new LinearLayout.LayoutParams(-2, -2);
-            retryParams.leftMargin = dp(7);
-            actions.addView(retry, retryParams);
+
+        if (user) {
+            TextView edit = actionChip("编辑");
+            actions.addView(edit);
+            edit.setOnClickListener(v -> editAsBranch(message));
+        } else if (last) {
+            TextView retry = actionChip("重新生成");
+            actions.addView(retry);
             retry.setOnClickListener(v -> regenerate());
         }
-        if (user) {
-            TextView reuse = actionChip("再次编辑");
-            LinearLayout.LayoutParams reuseParams = new LinearLayout.LayoutParams(-2, -2);
-            reuseParams.leftMargin = dp(7);
-            actions.addView(reuse, reuseParams);
-            reuse.setOnClickListener(v -> {
-                composer.setText(message.content);
-                composer.setSelection(composer.length());
-                composer.requestFocus();
+        TextView more = actionChip("⋯");
+        more.setContentDescription("更多消息操作");
+        actions.addView(more);
+        more.setOnClickListener(v -> {
+            android.widget.PopupMenu menu = new android.widget.PopupMenu(this, more);
+            menu.getMenu().add(0, 1, 0, "从此处开启新对话");
+            menu.getMenu().add(0, 2, 1, "分享这条消息");
+            menu.getMenu().add(0, 3, 2, "保存为记忆");
+            menu.setOnMenuItemClickListener(item -> {
+                if (item.getItemId() == 1) openBranch(message, null);
+                else if (item.getItemId() == 2) shareText(message.content, "分享消息");
+                else editMemory(null, message.content);
+                return true;
             });
-        }
+            menu.show();
+        });
+    }
+
+    private TextView messageText(String text) {
+        TextView view = label(text, 16, INK, false);
+        view.setTextIsSelectable(true);
+        view.setLineSpacing(dp(4), 1.05f);
+        return view;
+    }
+
+    private void addCodeBlock(LinearLayout body, MarkdownText.Block block) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(box(SAND, 12, BORDER, 1));
+        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(-1, -2);
+        cardParams.topMargin = dp(9);
+        cardParams.bottomMargin = dp(9);
+        body.addView(card, cardParams);
+        LinearLayout toolbar = new LinearLayout(this);
+        toolbar.setGravity(Gravity.CENTER_VERTICAL);
+        toolbar.setPadding(dp(12), 0, dp(5), 0);
+        card.addView(toolbar, new LinearLayout.LayoutParams(-1, -2));
+        TextView language = label(block.language.isEmpty() ? "代码" : block.language, 12, MUTED, true);
+        language.setSingleLine(true);
+        language.setEllipsize(TextUtils.TruncateAt.END);
+        toolbar.addView(language, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView copy = actionChip("复制代码");
+        toolbar.addView(copy);
+        copy.setOnClickListener(v -> copyText(block.text));
+
+        HorizontalScrollView scroll = new HorizontalScrollView(this);
+        scroll.setFillViewport(true);
+        card.addView(scroll, new LinearLayout.LayoutParams(-1, -2));
+        TextView code = messageText(block.text);
+        code.setTextSize(13);
+        code.setTypeface(Typeface.MONOSPACE);
+        code.setPadding(dp(12), dp(3), dp(12), dp(12));
+        scroll.addView(code, new HorizontalScrollView.LayoutParams(-2, -2));
     }
 
     private TextView actionChip(String title) {
-        TextView action = label(title, 10, MUTED, true);
+        TextView action = label(title, 12, MUTED, true);
         action.setGravity(Gravity.CENTER);
-        action.setPadding(dp(10), dp(5), dp(10), dp(5));
-        action.setBackground(pressable(box(Color.rgb(231, 242, 243), 9, 0, 0)));
+        action.setMinimumWidth(dp(44));
+        action.setMinimumHeight(dp(40));
+        action.setPadding(dp(9), dp(4), dp(9), dp(4));
+        action.setBackground(pressable(box(Color.TRANSPARENT, 9, 0, 0)));
         return action;
     }
 
-    private void addStatus(String status, boolean failed, boolean retryable) {
+    private void addStatus(String status, boolean failed, Runnable retry) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setPadding(dp(14), dp(11), dp(14), dp(11));
-        card.setBackground(box(failed ? Color.rgb(255, 245, 239) : MINT, 16,
+        card.setBackground(box(failed ? Color.rgb(255, 245, 239) : SAND, 16,
                 failed ? Color.rgb(237, 189, 169) : BORDER, 1));
         card.setElevation(dp(1));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
@@ -629,19 +633,19 @@ public final class MainActivity extends Activity {
         chatColumn.addView(card, params);
         card.addView(label((failed ? "⚠  " : "✦  ") + status, 13,
                 failed ? Color.rgb(137, 73, 57) : MUTED, false));
-        if (retryable) {
-            TextView retry = label("再试一次  →", 13, BLUE, true);
+        if (retry != null) {
+            TextView button = actionChip("生成回复");
             LinearLayout.LayoutParams retryParams = new LinearLayout.LayoutParams(-2, -2);
             retryParams.topMargin = dp(8);
-            card.addView(retry, retryParams);
-            retry.setOnClickListener(v -> requestReply());
+            card.addView(button, retryParams);
+            button.setOnClickListener(v -> retry.run());
         }
     }
 
     private TextView headerButton(String text, int size) {
-        TextView view = label(text, size, WHITE, true);
+        TextView view = label(text, size, INK, true);
         view.setGravity(Gravity.CENTER);
-        view.setBackground(pressable(box(Color.rgb(52, 117, 146), 12, 0, 0)));
+        view.setBackground(pressable(box(Color.TRANSPARENT, 12, 0, 0)));
         return view;
     }
 
@@ -652,38 +656,28 @@ public final class MainActivity extends Activity {
     }
 
     private void showConversationList() {
-        Dialog dialog = new Dialog(this, android.R.style.Theme_Material_Light_NoActionBar);
+        Dialog dialog = new Dialog(this);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(PALE);
+        root.setBackgroundColor(PAPER);
+        root.setFocusableInTouchMode(true);
         dialog.setContentView(root);
-        FrameLayout topFrame = new FrameLayout(this);
-        root.addView(topFrame, new LinearLayout.LayoutParams(-1, dp(88)));
-        topFrame.addView(new OceanBackdropView(this),
-                new FrameLayout.LayoutParams(-1, -1));
         LinearLayout top = new LinearLayout(this);
         top.setGravity(Gravity.CENTER_VERTICAL);
-        top.setPadding(dp(16), dp(13), dp(16), dp(16));
-        topFrame.addView(top, new FrameLayout.LayoutParams(-1, -1));
-        TextView back = headerButton("‹", 26);
-        back.setGravity(Gravity.CENTER);
-        top.addView(back, new LinearLayout.LayoutParams(dp(40), dp(42)));
+        top.setPadding(dp(9), 0, dp(14), 0);
+        root.addView(top, new LinearLayout.LayoutParams(-1, dp(65)));
+        TextView back = headerButton("‹", 27);
+        back.setContentDescription("关闭会话历史");
+        top.addView(back, new LinearLayout.LayoutParams(dp(42), dp(44)));
         back.setOnClickListener(v -> dialog.dismiss());
-        LinearLayout headingGroup = new LinearLayout(this);
-        headingGroup.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout.LayoutParams headParams = new LinearLayout.LayoutParams(0, -2, 1);
-        headParams.leftMargin = dp(13);
-        top.addView(headingGroup, headParams);
-        headingGroup.addView(label("所有会话", 20, WHITE, true));
-        TextView headingSub = label("YOUR LITTLE OCEAN", 9,
-                Color.rgb(184, 225, 233), true);
-        headingSub.setLetterSpacing(0.07f);
-        headingGroup.addView(headingSub);
-        TextView create = label("＋ 新对话", 14, WHITE, true);
+        TextView heading = label("会话历史", 18, INK, true);
+        top.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView create = label("＋ 新对话", 13, Color.WHITE, true);
         create.setGravity(Gravity.CENTER);
-        create.setBackground(pressable(box(CORAL, 13, 0, 0)));
-        top.addView(create, new LinearLayout.LayoutParams(dp(92), dp(42)));
+        create.setBackground(pressable(box(TERRACOTTA, 11, 0, 0)));
+        top.addView(create, new LinearLayout.LayoutParams(dp(87), dp(44)));
         create.setOnClickListener(v -> {
+            if (archiveBusy) return;
             newChat();
             dialog.dismiss();
         });
@@ -691,14 +685,13 @@ public final class MainActivity extends Activity {
         EditText search = new EditText(this);
         search.setSingleLine(true);
         search.setTextSize(14);
-        search.setHint("⌕  搜索会话标题或内容");
+        search.setHint("搜索会话");
         search.setHintTextColor(MUTED);
-        search.setTextColor(NAVY);
+        search.setTextColor(INK);
         search.setPadding(dp(15), dp(9), dp(15), dp(9));
-        search.setBackground(box(WHITE, 16, BORDER, 1));
-        search.setElevation(dp(1));
+        search.setBackground(box(SURFACE, 16, BORDER, 1));
         LinearLayout.LayoutParams searchParams = new LinearLayout.LayoutParams(-1, dp(49));
-        searchParams.setMargins(dp(16), dp(17), dp(16), dp(9));
+        searchParams.setMargins(dp(15), dp(5), dp(15), dp(13));
         root.addView(search, searchParams);
         ScrollView scroll = new ScrollView(this);
         scroll.setVerticalScrollBarEnabled(false);
@@ -716,11 +709,16 @@ public final class MainActivity extends Activity {
             @Override public void afterTextChanged(Editable s) { }
         });
         refresh.run();
+        root.requestFocus();
         dialog.show();
         Window window = dialog.getWindow();
         if (window != null) {
-            window.setLayout(-1, -1);
-            window.setStatusBarColor(Color.rgb(18, 54, 80));
+            window.setBackgroundDrawableResource(android.R.color.transparent);
+            window.setGravity(Gravity.LEFT | Gravity.TOP);
+            window.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                    | android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+            window.setLayout(Math.min(dp(410), (int) (getResources().getDisplayMetrics().widthPixels * .9)), -1);
+            window.setDimAmount(.3f);
         }
     }
 
@@ -728,41 +726,24 @@ public final class MainActivity extends Activity {
         list.removeAllViews();
         List<ConversationStore.Conversation> chats = store.search(query);
         if (chats.isEmpty()) {
-            LinearLayout empty = new LinearLayout(this);
-            empty.setOrientation(LinearLayout.VERTICAL);
-            empty.setGravity(Gravity.CENTER);
-            list.addView(empty, new LinearLayout.LayoutParams(-1, dp(220)));
-            empty.addView(new PixelWhaleView(this),
-                    new LinearLayout.LayoutParams(dp(130), dp(95)));
-            TextView message = label("这片海域还没有会话", 14, MUTED, true);
+            TextView message = label("没有找到会话", 14, MUTED, false);
             message.setGravity(Gravity.CENTER);
-            empty.addView(message);
+            list.addView(message, new LinearLayout.LayoutParams(-1, dp(100)));
             return;
         }
-        TextView count = label("✦  " + chats.size() + " 个会话", 11, MUTED, true);
-        LinearLayout.LayoutParams countParams = new LinearLayout.LayoutParams(-1, -2);
-        countParams.bottomMargin = dp(10);
-        list.addView(count, countParams);
         for (ConversationStore.Conversation chat : chats) {
             LinearLayout row = new LinearLayout(this);
             row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(dp(12), dp(10), dp(9), dp(10));
-            row.setBackground(pressable(box(chat.id == currentId ? MINT : WHITE,
-                    17, BORDER, 1)));
-            row.setElevation(dp(1));
-            LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, dp(84));
-            rowParams.bottomMargin = dp(9);
+            row.setPadding(dp(12), dp(7), dp(5), dp(7));
+            row.setBackground(pressable(box(chat.id == currentId ? SAND : Color.TRANSPARENT,
+                    12, 0, 0)));
+            LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, -2);
+            rowParams.bottomMargin = dp(5);
             list.addView(row, rowParams);
-            FrameLayout icon = new FrameLayout(this);
-            icon.setBackground(box(chat.id == currentId ? WHITE : MINT, 13, 0, 0));
-            row.addView(icon, new LinearLayout.LayoutParams(dp(46), dp(46)));
-            icon.addView(new PixelWhaleView(this), new FrameLayout.LayoutParams(-1, -1));
             LinearLayout text = new LinearLayout(this);
             text.setOrientation(LinearLayout.VERTICAL);
-            LinearLayout.LayoutParams textParams = new LinearLayout.LayoutParams(0, -2, 1);
-            textParams.leftMargin = dp(12);
-            row.addView(text, textParams);
-            TextView title = label(chat.title, 15, NAVY, true);
+            row.addView(text, new LinearLayout.LayoutParams(0, -2, 1));
+            TextView title = label(chat.pinned ? "置顶 · " + chat.title : chat.title, 15, INK, true);
             title.setSingleLine(true);
             title.setEllipsize(TextUtils.TruncateAt.END);
             text.addView(title);
@@ -774,26 +755,13 @@ public final class MainActivity extends Activity {
             LinearLayout.LayoutParams detailParams = new LinearLayout.LayoutParams(-1, -2);
             detailParams.topMargin = dp(5);
             text.addView(detail, detailParams);
-            LinearLayout side = new LinearLayout(this);
-            side.setOrientation(LinearLayout.VERTICAL);
-            side.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-            row.addView(side, new LinearLayout.LayoutParams(dp(48), -1));
-            String date = new SimpleDateFormat("MM/dd", Locale.getDefault())
-                    .format(new Date(chat.updatedAt));
-            TextView dateText = label(date, 10, MUTED, false);
-            dateText.setGravity(Gravity.RIGHT);
-            side.addView(dateText);
-            TextView more = label("⋯", 21, BLUE, true);
-            more.setGravity(Gravity.CENTER);
-            more.setBackground(pressable(box(Color.TRANSPARENT, 8, 0, 0)));
-            side.addView(more, new LinearLayout.LayoutParams(dp(38), dp(36)));
+            TextView more = headerButton("⋯", 21);
+            more.setContentDescription("会话操作");
+            row.addView(more, new LinearLayout.LayoutParams(dp(43), dp(44)));
             row.setOnClickListener(v -> {
-                discardPendingImage();
-                discardPendingFile();
-                currentId = chat.id;
-                store.selectChat(currentId);
+                if (archiveBusy) return;
+                selectChat(chat.id);
                 dialog.dismiss();
-                renderChat(true);
             });
             more.setOnClickListener(v -> showConversationActions(chat.id,
                     () -> renderConversationList(list, query, dialog)));
@@ -805,10 +773,15 @@ public final class MainActivity extends Activity {
         if (chat == null) return;
         new AlertDialog.Builder(this)
                 .setTitle(chat.title)
-                .setItems(new String[]{"重命名", "删除会话"}, (dialog, index) -> {
-                    if (index == 0) renameChat(chatId, refresh);
-                    else deleteChat(chatId, refresh);
-                }).show();
+                .setItems(new String[]{chat.pinned ? "取消置顶" : "置顶会话", "重命名", "删除会话"},
+                        (dialog, index) -> {
+                            if (archiveBusy) return;
+                            if (index == 0) {
+                                store.setPinned(chatId, !chat.pinned);
+                                refresh.run();
+                            } else if (index == 1) renameChat(chatId, refresh);
+                            else deleteChat(chatId, refresh);
+                        }).show();
     }
 
     private void showChatMenu() {
@@ -816,64 +789,51 @@ public final class MainActivity extends Activity {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(18), dp(18), dp(18), dp(22));
-        panel.setBackground(box(WHITE, 23, 0, 0));
+        panel.setBackground(box(SURFACE, 23, 0, 0));
         sheet.setContentView(panel);
-        TextView title = label("✦  会话工具", 19, NAVY, true);
+        TextView title = label("会话设置", 19, INK, true);
+        title.setPadding(0, 0, 0, dp(12));
         panel.addView(title);
-        TextView subtitle = label("让小鲸按照你的方式回答", 12, MUTED, false);
-        LinearLayout.LayoutParams subtitleParams = new LinearLayout.LayoutParams(-1, -2);
-        subtitleParams.topMargin = dp(3);
-        subtitleParams.bottomMargin = dp(14);
-        panel.addView(subtitle, subtitleParams);
         ScrollView scroll = new ScrollView(this);
         scroll.setVerticalScrollBarEnabled(false);
         panel.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         LinearLayout items = new LinearLayout(this);
         items.setOrientation(LinearLayout.VERTICAL);
         scroll.addView(items);
-        String[] names = {"选择模型", "编辑系统提示词", "压缩上下文", "查看压缩摘要",
+        String[] names = {"选择模型", "编辑系统提示词", "记忆与夜间做梦", "压缩上下文", "查看压缩摘要",
                 "重命名会话", "分享会话文本", "清空当前会话", "API Key 设置",
                 "导出全部会话", "导入会话备份", "远端文件管理"};
-        String[] marks = {"◈", "✎", "▦", "☷", "✎", "↗", "⌫", "⚙", "⇧", "⇩", "▤"};
+        String[] marks = {"◈", "✎", "☾", "▦", "☷", "✎", "↗", "⌫", "⚙", "⇧", "⇩", "▤"};
+        Runnable[] callbacks = {this::showModelPicker, this::editSystemPrompt, this::showMemorySettings,
+                this::compressNow, () -> showSummary(store.getChat(currentId)),
+                () -> renameChat(currentId, this::renderChat), this::shareChat, this::clearChat, this::showSettings,
+                this::chooseBackupExport, this::chooseBackupImport, this::showRemoteFiles};
         for (int i = 0; i < names.length; i++) {
             final int action = i;
             LinearLayout item = new LinearLayout(this);
             item.setGravity(Gravity.CENTER_VERTICAL);
             item.setPadding(dp(12), 0, dp(12), 0);
-            item.setBackground(pressable(box(i == 6 ? Color.rgb(255, 246, 242) : PALE,
+            item.setBackground(pressable(box(i == 7 ? Color.rgb(255, 246, 242) : PAPER,
                     13, 0, 0)));
             LinearLayout.LayoutParams itemParams = new LinearLayout.LayoutParams(-1, dp(47));
             itemParams.bottomMargin = dp(6);
             items.addView(item, itemParams);
-            TextView mark = label(marks[i], 18, i == 6 ? CORAL : BLUE, true);
+            TextView mark = label(marks[i], 18, i == 7 ? TERRACOTTA : ACCENT, true);
             mark.setGravity(Gravity.CENTER);
             item.addView(mark, new LinearLayout.LayoutParams(dp(31), -1));
-            TextView name = label(names[i], 14, NAVY, true);
+            TextView name = label(names[i], 14, INK, true);
             LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(0, -2, 1);
             nameParams.leftMargin = dp(9);
             item.addView(name, nameParams);
             item.addView(label("›", 21, MUTED, false));
             item.setOnClickListener(v -> {
                 sheet.dismiss();
-                switch (action) {
-                    case 0: showModelPicker(); break;
-                    case 1: editSystemPrompt(); break;
-                    case 2: compressNow(); break;
-                    case 3: showSummary(store.getChat(currentId)); break;
-                    case 4: renameChat(currentId, this::renderChat); break;
-                    case 5: shareChat(); break;
-                    case 6: clearChat(); break;
-                    case 7: showSettings(); break;
-                    case 8: chooseBackupExport(); break;
-                    case 9: chooseBackupImport(); break;
-                    case 10: showRemoteFiles(); break;
-                    default: break;
-                }
+                callbacks[action].run();
             });
         }
-        TextView cancel = label("完成", 14, BLUE, true);
+        TextView cancel = label("完成", 14, ACCENT, true);
         cancel.setGravity(Gravity.CENTER);
-        cancel.setBackground(pressable(box(MINT, 13, 0, 0)));
+        cancel.setBackground(pressable(box(SAND, 13, 0, 0)));
         LinearLayout.LayoutParams cancelParams = new LinearLayout.LayoutParams(-1, dp(42));
         cancelParams.topMargin = dp(7);
         panel.addView(cancel, cancelParams);
@@ -979,11 +939,17 @@ public final class MainActivity extends Activity {
                 .setTitle("删除这个会话？")
                 .setMessage("这个会话的消息、系统提示词和压缩摘要都会从本机删除。")
                 .setPositiveButton("删除", (d, which) -> {
-                    if (currentId == chatId) { discardPendingImage(); discardPendingFile(); }
+                    boolean selected = currentId == chatId;
                     store.delete(chatId);
-                    if (currentId == chatId) currentId = store.selectedChat().id;
+                    memories.discardSamples(chatId);
+                    if (selected) {
+                        discardPendingImage();
+                        discardPendingFile();
+                        currentId = store.selectedChat().id;
+                        restoreDraft();
+                    }
                     refresh.run();
-                    renderChat();
+                    renderChat(selected);
                 })
                 .setNegativeButton("取消", null).show();
     }
@@ -1002,6 +968,8 @@ public final class MainActivity extends Activity {
                     discardPendingImage();
                     discardPendingFile();
                     store.clear(targetId);
+                    memories.discardSamples(targetId);
+                    restoreDraft();
                     errorText = null;
                     renderChat();
                 })
@@ -1014,7 +982,7 @@ public final class MainActivity extends Activity {
             return;
         }
         ScrollView scroll = new ScrollView(this);
-        TextView text = label(chat.summary, 14, NAVY, false);
+        TextView text = label(chat.summary, 14, INK, false);
         text.setTextIsSelectable(true);
         text.setPadding(dp(20), dp(14), dp(20), dp(14));
         scroll.addView(text);
@@ -1034,10 +1002,153 @@ public final class MainActivity extends Activity {
                     .append(message.imagePath == null ? "" : "[图片] ")
                     .append(message.content).append("\n\n");
         }
+        shareText(text.toString(), "分享会话文本");
+    }
+
+    private void shareText(String text, String chooserTitle) {
         Intent intent = new Intent(Intent.ACTION_SEND);
         intent.setType("text/plain");
-        intent.putExtra(Intent.EXTRA_TEXT, text.toString());
-        startActivity(Intent.createChooser(intent, "分享会话文本"));
+        intent.putExtra(Intent.EXTRA_TEXT, text);
+        startActivity(Intent.createChooser(intent, chooserTitle));
+    }
+
+    private void showMemorySettings() {
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(20), dp(8), dp(20), dp(10));
+        scroll.addView(content);
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("记忆与夜间做梦")
+                .setView(scroll)
+                .setPositiveButton("完成", null)
+                .create();
+        SharedPreferences.OnSharedPreferenceChangeListener refresh = (preferences, key) -> {
+            if (dialog.isShowing() && !"samples".equals(key) && !"revision".equals(key)) renderMemorySettings(content);
+        };
+        dialog.setOnDismissListener(ignored -> memories.unwatch(refresh));
+        renderMemorySettings(content);
+        dialog.show();
+        memories.watch(refresh);
+    }
+
+    private void renderMemorySettings(LinearLayout content) {
+        content.removeAllViews();
+        Switch use = new Switch(this);
+        use.setText("跨会话记忆");
+        use.setTextSize(16);
+        use.setMinHeight(dp(50));
+        use.setChecked(memories.enabled());
+        content.addView(use, new LinearLayout.LayoutParams(-1, -2));
+        memoryHint(content, "开启后，已保存的记忆会随提问发送给 DeepSeek。你可以手动添加，或发送「请记住：…」。");
+        use.setOnCheckedChangeListener((button, on) -> {
+            memories.setEnabled(on);
+            NightMemoryJob.sync(this);
+        });
+
+        Switch dream = new Switch(this);
+        dream.setText("夜间做梦");
+        dream.setTextSize(16);
+        dream.setMinHeight(dp(50));
+        dream.setEnabled(memories.enabled());
+        dream.setChecked(memories.nightly());
+        content.addView(dream, new LinearLayout.LayoutParams(-1, -2));
+        memoryHint(content, "开启后，应用会在本地时间凌晨 2 点后联网整理近期新消息中的长期偏好和事实。整理使用你的 DeepSeek 额度。");
+        dream.setOnCheckedChangeListener((button, on) -> {
+            memories.setNightly(on);
+            if (!NightMemoryJob.sync(this))
+                Toast.makeText(this, "系统暂时无法安排夜间整理", Toast.LENGTH_LONG).show();
+        });
+        if (memories.nightly()) {
+            if (memories.lastRun() > 0) {
+                String time = android.text.format.DateFormat.format("MM/dd HH:mm", memories.lastRun()).toString();
+                memoryHint(content, time + "  " + memories.lastStatus());
+            }
+            TextView now = actionChip("立即整理");
+            now.setTextColor(ACCENT);
+            content.addView(now, new LinearLayout.LayoutParams(-2, -2));
+            now.setOnClickListener(v -> {
+                String status = NightMemoryJob.runSoon(this) ? "系统将在可用时开始整理" : "系统暂时无法开始整理";
+                Toast.makeText(this, status, Toast.LENGTH_SHORT).show();
+            });
+        }
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setGravity(Gravity.CENTER_VERTICAL);
+        content.addView(actions, new LinearLayout.LayoutParams(-1, -2));
+        actions.addView(label("已保存的记忆", 15, INK, true), new LinearLayout.LayoutParams(0, -2, 1));
+        TextView add = actionChip("＋ 添加");
+        add.setTextColor(ACCENT);
+        actions.addView(add);
+        add.setOnClickListener(v -> editMemory(null, ""));
+
+        List<MemoryStore.Entry> entries = memories.entries();
+        if (entries.isEmpty()) memoryHint(content, "还没有已保存的记忆");
+        for (MemoryStore.Entry entry : entries) {
+            TextView item = label(entry.text + "\n" + (entry.automatic ? "夜间整理" : "手动保存"), 14, INK, false);
+            item.setPadding(dp(11), dp(10), dp(11), dp(10));
+            item.setBackground(pressable(box(SAND, 10, 0, 0)));
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+            params.bottomMargin = dp(6);
+            content.addView(item, params);
+            item.setOnClickListener(v -> new AlertDialog.Builder(this)
+                    .setTitle(entry.text)
+                    .setItems(new String[]{"编辑", "删除"}, (selection, which) -> {
+                        if (which == 0) editMemory(entry.id, entry.text);
+                        else memories.forget(entry.id);
+                    }).show());
+        }
+        if (!entries.isEmpty()) {
+            TextView clear = actionChip("清空记忆");
+            content.addView(clear, new LinearLayout.LayoutParams(-2, -2));
+            clear.setOnClickListener(v -> new AlertDialog.Builder(this)
+                    .setTitle("清空已保存的记忆？")
+                    .setMessage("已保存的记忆和待整理消息摘录会被删除。")
+                    .setNegativeButton("取消", null)
+                    .setPositiveButton("清空", (ignored, which) -> memories.clear()).show());
+        }
+    }
+
+    private void memoryHint(LinearLayout content, String text) {
+        TextView note = label(text, 13, MUTED, false);
+        note.setLineSpacing(dp(2), 1f);
+        note.setPadding(0, 0, 0, dp(9));
+        content.addView(note);
+    }
+
+    private void editMemory(String id, String initial) {
+        EditText input = new EditText(this);
+        input.setTextSize(16);
+        input.setMinLines(2);
+        input.setMaxLines(6);
+        input.setHint("例如，我喜欢用实际例子理解新概念");
+        input.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(MemoryStore.ENTRY_LIMIT)});
+        input.setText(initial);
+        input.setSelection(input.length());
+        LinearLayout frame = new LinearLayout(this);
+        frame.setPadding(dp(20), dp(8), dp(20), 0);
+        frame.addView(input, new LinearLayout.LayoutParams(-1, -2));
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(id == null ? "添加记忆" : "编辑记忆")
+                .setView(frame)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("保存", null)
+                .create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            String value = input.getText().toString().trim();
+            if (!memories.save(id, value)) {
+                input.setError(value.isEmpty() ? "请输入记忆内容" : "最多可保存 32 条手动记忆");
+                return;
+            }
+            Toast.makeText(this, "已保存记忆", Toast.LENGTH_SHORT).show();
+            dialog.dismiss();
+        }));
+        dialog.show();
+    }
+
+    private void observeMemory(long chatId, String text) {
+        if (memories.observe(chatId, text))
+            Toast.makeText(this, "已记住，可在记忆设置中管理", Toast.LENGTH_SHORT).show();
     }
 
     private void showSettings() {
@@ -1049,7 +1160,7 @@ public final class MainActivity extends Activity {
         content.addView(info);
         TextView state;
         try {
-            state = label(secrets.read() == null ? "当前：尚未设置" : "当前：已保存 API Key", 12, BLUE, true);
+            state = label(secrets.read() == null ? "当前：尚未设置" : "当前：已保存 API Key", 12, ACCENT, true);
         } catch (Exception e) {
             state = label("当前：保存的 Key 无法读取，请重新设置", 12,
                     Color.rgb(150, 83, 63), true);
@@ -1081,6 +1192,8 @@ public final class MainActivity extends Activity {
                 }
                 try {
                     secrets.save(value);
+                    keyConfigured = true;
+                    renderChat();
                     Toast.makeText(this, "API Key 已保存", Toast.LENGTH_SHORT).show();
                     dialog.dismiss();
                 } catch (Exception e) {
@@ -1089,6 +1202,8 @@ public final class MainActivity extends Activity {
             });
             dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
                 secrets.clear();
+                keyConfigured = false;
+                renderChat();
                 Toast.makeText(this, "API Key 已清除", Toast.LENGTH_SHORT).show();
                 dialog.dismiss();
             });
@@ -1097,12 +1212,93 @@ public final class MainActivity extends Activity {
     }
 
     private void newChat() {
-        if (archiveBusy) { Toast.makeText(this, "请等备份操作结束", Toast.LENGTH_SHORT).show(); return; }
-        discardPendingImage();
-        discardPendingFile();
-        currentId = store.createChat();
-        errorText = null;
+        if (archiveBusy) {
+            Toast.makeText(this, "请等当前操作结束", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        selectChat(store.createChat());
+    }
+
+    private void selectChat(long chatId) {
+        if (currentId != chatId) {
+            store.saveDraft(currentId, composer.getText().toString());
+            discardPendingImage();
+            discardPendingFile();
+            currentId = chatId;
+            store.selectChat(chatId);
+            restoreDraft();
+        }
         renderChat(true);
+    }
+
+    private void restoreDraft() {
+        composer.setText(store.draft(currentId));
+        composer.setSelection(composer.length());
+        composer.clearFocus();
+    }
+
+    private void editAsBranch(ConversationStore.Message message) {
+        if (busy || archiveBusy) return;
+        EditText edit = new EditText(this);
+        edit.setText(message.content);
+        edit.setTextSize(16);
+        edit.setMinLines(2);
+        edit.setMaxLines(8);
+        edit.setSelection(edit.length());
+        LinearLayout frame = new LinearLayout(this);
+        frame.setPadding(dp(20), dp(8), dp(20), 0);
+        frame.addView(edit, new LinearLayout.LayoutParams(-1, -2));
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("编辑到新分支")
+                .setView(frame)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("发送", null)
+                .create();
+        dialog.setOnShowListener(ignored ->
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+                    String updated = edit.getText().toString().trim();
+                    if (updated.isEmpty()) {
+                        edit.setError("请输入消息");
+                        return;
+                    }
+                    dialog.dismiss();
+                    openBranch(message, updated);
+                }));
+        dialog.show();
+    }
+
+    private void openBranch(ConversationStore.Message message, String editedText) {
+        if (archiveBusy || busy) {
+            Toast.makeText(this, "请等当前操作结束", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        long sourceId = currentId;
+        archiveBusy = true;
+        sendButton.setEnabled(false);
+        Toast.makeText(this, "正在创建会话分支…", Toast.LENGTH_SHORT).show();
+        worker.execute(() -> {
+            long branchId;
+            try {
+                branchId = store.branch(sourceId, message.id, editedText);
+            } catch (Exception e) {
+                branchId = -1;
+            }
+            long result = branchId;
+            runOnUiThread(() -> {
+                if (isDestroyed()) return;
+                archiveBusy = false;
+                if (result < 0) {
+                    Toast.makeText(this, "无法创建分支，请检查附件和剩余空间。", Toast.LENGTH_LONG).show();
+                    renderChat();
+                    return;
+                }
+                selectChat(result);
+                if (editedText != null) {
+                    observeMemory(result, editedText);
+                    requestReply();
+                }
+            });
+        });
     }
 
     private String keyOrPrompt() {
@@ -1142,6 +1338,7 @@ public final class MainActivity extends Activity {
         }
         store.addMessage(currentId, "user", question, pendingImagePath, pendingFilePath,
                 attachments.length() == 0 ? null : attachments.toString());
+        observeMemory(currentId, question);
         pendingImagePath = null;
         pendingFilePath = null;
         extraImages.clear();
@@ -1149,62 +1346,62 @@ public final class MainActivity extends Activity {
         updatePendingImage();
         updatePendingFile();
         composer.setText("");
+        store.saveDraft(currentId, "");
         InputMethodManager keyboard = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
         if (keyboard != null) keyboard.hideSoftInputFromWindow(composer.getWindowToken(), 0);
         requestReply();
     }
 
     private void regenerate() {
-        if (busy || keyOrPrompt() == null) return;
-        if (store.removeLastAssistant(currentId)) requestReply();
+        runRequest(false, true);
     }
 
     private void requestReply() {
-        runRequest(false);
+        runRequest(false, false);
     }
 
     private void compressNow() {
-        runRequest(true);
+        runRequest(true, false);
     }
 
-    private void runRequest(boolean manualCompression) {
+    private void runRequest(boolean manualCompression, boolean regenerate) {
         if (busy || archiveBusy) return;
-        String apiKey = keyOrPrompt();
-        if (apiKey == null) return;
         ConversationStore.Conversation selectedChat = store.getChat(currentId);
         if (selectedChat == null) return;
         List<ConversationStore.Message> snapshot = store.messages(currentId);
-        if (!manualCompression && (snapshot.isEmpty() ||
-                !"user".equals(snapshot.get(snapshot.size() - 1).role))) return;
-        if (!manualCompression && "pro".equals(selectedChat.model) &&
-                hasActiveAttachment(snapshot, selectedChat.summaryUntilId)) {
-            store.setModel(currentId, "flash");
-            selectedChat = store.getChat(currentId);
-            Toast.makeText(this, "此会话含图片，已切换到 DeepSeek Flash", Toast.LENGTH_LONG).show();
-        }
-        if (!manualCompression && webEnabled && "pro".equals(selectedChat.model)) {
-            store.setModel(currentId, "think");
-            selectedChat = store.getChat(currentId);
-            Toast.makeText(this, "联网工具使用 DeepSeek Flash，已切换模型", Toast.LENGTH_LONG).show();
-        }
-        final ConversationStore.Conversation chat = selectedChat;
-        final boolean useWeb = webEnabled;
-        if (manualCompression && ContextPlanner.nextBatch(snapshot, chat.summaryUntilId) == null) {
-            Toast.makeText(this, "至少需要 10 条消息，才能保留最近对话并压缩较早内容", Toast.LENGTH_LONG).show();
+        int lastIndex = snapshot.size() - 1;
+        if (regenerate && (lastIndex < 1 || !"assistant".equals(snapshot.get(lastIndex).role))) return;
+        long replacedId = regenerate ? snapshot.get(lastIndex).id : 0;
+        List<ConversationStore.Message> history = regenerate ? snapshot.subList(0, lastIndex) : snapshot;
+        if (!manualCompression && (history.isEmpty() ||
+                !"user".equals(history.get(history.size() - 1).role))) return;
+        if (manualCompression && ContextPlanner.nextBatch(history, selectedChat.summaryUntilId, false) == null) {
+            Toast.makeText(this, "已保留最新一轮。暂无更早的对话可压缩。", Toast.LENGTH_LONG).show();
             return;
         }
+        String apiKey = keyOrPrompt();
+        if (apiKey == null) return;
+        String memory = manualCompression ? "" : memories.prompt();
+        boolean useWeb = selectedChat.webEnabled;
+        if (!manualCompression && "pro".equals(selectedChat.model) &&
+                (useWeb || hasActiveAttachment(history, selectedChat.summaryUntilId))) {
+            store.setModel(currentId, useWeb ? "think" : "flash");
+            selectedChat = store.getChat(currentId);
+            Toast.makeText(this, "已切换到支持本次联网或附件的 DeepSeek Flash", Toast.LENGTH_LONG).show();
+        }
+        final ConversationStore.Conversation chat = selectedChat;
         long targetId = currentId;
         busy = true;
         busyChatId = targetId;
+        regeneratingId = replacedId;
         partialText = "";
         DeepSeekClient.Control control = new DeepSeekClient.Control();
         activeControl = control;
         errorText = null;
         errorChatId = -1;
-        boolean shouldCompress = manualCompression || ContextPlanner.estimatedTokens(
-                ContextPlanner.active(snapshot, chat.summaryUntilId), chat.summary) >
-                ContextPlanner.AUTO_THRESHOLD;
-        progressText = shouldCompress ? "正在压缩较早对话…" : "小鲸鱼正在想答案…";
+        retryAction = null;
+        boolean shouldCompress = manualCompression || ChatRequest.shouldSummarize(chat, history);
+        progressText = shouldCompress ? "正在整理较早的对话…" : "正在生成回复…";
         renderChat(!manualCompression);
 
         worker.execute(() -> {
@@ -1232,60 +1429,32 @@ public final class MainActivity extends Activity {
                 }
                 return id;
             };
-            String summary = chat.summary;
-            long until = chat.summaryUntilId;
-            DeepSeekClient.Reply reply = null;
-            String failure = null;
             final long[] lastStreamUpdate = {0};
-            try {
-                if (shouldCompress) {
-                    ContextPlanner.Batch batch;
-                    while ((batch = ContextPlanner.nextBatch(snapshot, until)) != null &&
-                            (manualCompression || ContextPlanner.estimatedTokens(
-                                    ContextPlanner.active(snapshot, until), summary) >
-                                    ContextPlanner.AUTO_THRESHOLD)) {
-                        summary = DeepSeekClient.summarize(apiKey, summary, batch.messages, documents, control);
-                        until = batch.throughId;
+            DeepSeekClient.Progress showText = accumulated -> {
+                long now = android.os.SystemClock.uptimeMillis();
+                if (now - lastStreamUpdate[0] < 70) return;
+                lastStreamUpdate[0] = now;
+                runOnUiThread(() -> {
+                    if (isDestroyed() || !busy || busyChatId != targetId || control.isCancelled()) return;
+                    partialText = accumulated;
+                    if (currentId == targetId) {
+                        if (streamingBubble == null) renderChat(isNearBottom());
+                        else {
+                            boolean follow = isNearBottom();
+                            streamingBubble.setText(accumulated);
+                            if (follow) scrollToBottom();
+                        }
                     }
-                }
-                if (!manualCompression) {
-                    runOnUiThread(() -> {
-                        progressText = "小鲸鱼正在想答案…";
-                        if (!isDestroyed() && currentId == targetId) renderChat(false);
-                    });
-                    reply = DeepSeekClient.reply(apiKey, chat.model, useWeb, chat.systemPrompt, summary,
-                            ContextPlanner.active(snapshot, until), documents, control, accumulated -> {
-                                long now = System.currentTimeMillis();
-                                if (now - lastStreamUpdate[0] < 70) return;
-                                lastStreamUpdate[0] = now;
-                                runOnUiThread(() -> {
-                                    if (isDestroyed() || !busy || busyChatId != targetId) return;
-                                    partialText = accumulated;
-                                    if (currentId == targetId) {
-                                        if (streamingBubble == null) renderChat(isNearBottom());
-                                        else {
-                                            boolean follow = isNearBottom();
-                                            streamingBubble.setText(accumulated);
-                                            if (follow) chatScroll.post(() ->
-                                                    chatScroll.fullScroll(View.FOCUS_DOWN));
-                                        }
-                                    }
-                                });
-                            }, status -> runOnUiThread(() -> {
-                                if (isDestroyed() || !busy || busyChatId != targetId) return;
-                                progressText = status;
-                                if (currentId == targetId) renderChat(false);
-                            }));
-                }
-            } catch (Exception e) {
-                failure = friendlyError(e);
-            }
-            final String finalSummary = summary;
-            final long finalUntil = until;
-            final String finalAnswer = reply == null ? null : reply.text;
-            final String finalToolCalls = reply == null ? null : reply.serverToolCalls;
-            final String finalSources = reply == null ? null : reply.sources;
-            final String finalFailure = failure;
+                });
+            };
+            DeepSeekClient.ToolProgress showStatus = status -> runOnUiThread(() -> {
+                if (isDestroyed() || !busy || busyChatId != targetId || control.isCancelled()) return;
+                progressText = status;
+                if (currentId == targetId && streamingBubble == null) renderChat(false);
+            });
+            ChatRequest.Outcome outcome = ChatRequest.run(apiKey, chat, history, manualCompression, memory,
+                    documents, control, showText, showStatus);
+            DeepSeekClient.Reply result = outcome.reply;
             runOnUiThread(() -> {
                 if (isDestroyed()) return;
                 busy = false;
@@ -1296,26 +1465,36 @@ public final class MainActivity extends Activity {
                     renderChat();
                     return;
                 }
-                if (finalUntil != chat.summaryUntilId)
-                    store.updateSummary(targetId, finalSummary, finalUntil);
-                if (finalAnswer != null && !finalAnswer.isEmpty())
-                    store.addAssistantWithTools(targetId, finalAnswer, finalToolCalls, finalSources);
-                if (control.isCancelled()) {
+                boolean cancelled = control.isCancelled();
+                if (!cancelled && outcome.throughId != chat.summaryUntilId)
+                    store.updateSummary(targetId, outcome.summary, outcome.throughId);
+                boolean replySaved = result != null && !result.text.isEmpty() && (!cancelled || replacedId == 0);
+                if (replySaved) store.saveReply(targetId, replacedId, result);
+                if (cancelled || outcome.failure != null) {
                     errorChatId = targetId;
-                    errorText = finalAnswer == null || finalAnswer.isEmpty()
-                            ? "已停止生成，可点击重试。" : "已停止生成，已保留当前回复。";
-                    errorRetryable = finalAnswer == null || finalAnswer.isEmpty();
-                } else if (finalFailure != null) {
-                    errorChatId = targetId;
-                    errorText = finalFailure;
-                    errorRetryable = !manualCompression;
+                    errorText = cancelled
+                            ? (replySaved ? "已停止生成，当前回复已保留。" : "已停止。")
+                            : friendlyError(outcome.failure);
+                    if (!manualCompression && !replySaved)
+                        retryAction = () -> runRequest(false, regenerate);
+                    else if (manualCompression && !history.isEmpty() &&
+                            "user".equals(history.get(history.size() - 1).role))
+                        retryAction = this::requestReply;
                 } else if (manualCompression) {
-                    Toast.makeText(this, "较早对话已压缩", Toast.LENGTH_SHORT).show();
+                    String notice = outcome.throughId == chat.summaryUntilId
+                            ? "摘要没有缩短上下文，已保留原文。" : "较早对话已整理为摘要";
+                    Toast.makeText(this, notice, Toast.LENGTH_SHORT).show();
+                } else if (result != null && result.truncated) {
+                    errorChatId = targetId;
+                    errorText = "回复达到生成上限。可发送「继续」接着问。";
                 }
-                if (currentId == targetId)
-                    renderChat(!manualCompression && isNearBottom());
-                else if (finalAnswer != null)
-                    Toast.makeText(this, "另一个会话已收到回复", Toast.LENGTH_SHORT).show();
+                if (outcome.omittedAttachments && !cancelled)
+                    Toast.makeText(this, "较早附件仍保存在聊天记录中，未纳入本次摘要。", Toast.LENGTH_LONG).show();
+                if (currentId == targetId) renderChat(!manualCompression && isNearBottom());
+                else {
+                    renderChat(false);
+                    if (replySaved) Toast.makeText(this, "另一会话已收到回复", Toast.LENGTH_SHORT).show();
+                }
             });
         });
     }
@@ -1336,6 +1515,10 @@ public final class MainActivity extends Activity {
                     ConversationStore.extras(message).length() > 0)) return true;
         }
         return false;
+    }
+
+    private void scrollToBottom() {
+        chatScroll.post(() -> chatScroll.scrollTo(0, chatColumn.getHeight()));
     }
 
     private boolean isNearBottom() {
@@ -1360,7 +1543,7 @@ public final class MainActivity extends Activity {
                 || value.contains("SSL")) return "连接失败，请检查网络后重试。";
         if (value.startsWith("DeepSeek") || value.startsWith("API Key") ||
                 value.startsWith("请求") || value.startsWith("回复内容") ||
-                value.startsWith("图片") || value.startsWith("V4 Pro")) return value.trim();
+                value.startsWith("图片") || value.startsWith("文档") || value.startsWith("V4 Pro")) return value.trim();
         return "请求失败，请稍后重试。";
     }
 
@@ -1523,7 +1706,7 @@ public final class MainActivity extends Activity {
     private void showFullImage(String path) {
         Dialog dialog = new Dialog(this, android.R.style.Theme_Material_Light_NoActionBar);
         FrameLayout frame = new FrameLayout(this);
-        frame.setBackgroundColor(NAVY);
+        frame.setBackgroundColor(INK);
         ImageView picture = new ImageView(this);
         picture.setScaleType(ImageView.ScaleType.FIT_CENTER);
         frame.addView(picture, new FrameLayout.LayoutParams(-1, -1));
@@ -1532,7 +1715,7 @@ public final class MainActivity extends Activity {
             picture.setImageDrawable(null);
             if (shown[0] != null) shown[0].recycle();
         });
-        TextView close = label("关闭 ×", 15, WHITE, true);
+        TextView close = label("关闭 ×", 15, SURFACE, true);
         close.setGravity(Gravity.CENTER);
         FrameLayout.LayoutParams closeParams = new FrameLayout.LayoutParams(dp(80), dp(48),
                 Gravity.TOP | Gravity.RIGHT);
@@ -1564,6 +1747,7 @@ public final class MainActivity extends Activity {
             Uri uri = data.getData();
             boolean exporting = requestCode == EXPORT_REQUEST;
             archiveBusy = true;
+            renderChat();
             Toast.makeText(this, exporting ? "正在导出会话…" : "正在导入会话…", Toast.LENGTH_SHORT).show();
             imageWorker.execute(() -> {
                 String error = null;
@@ -1587,15 +1771,10 @@ public final class MainActivity extends Activity {
                     if (isDestroyed()) return;
                     archiveBusy = false;
                     if (finalError == null) {
-                        if (!exporting && finalId > 0) {
-                            discardPendingImage();
-                            discardPendingFile();
-                            currentId = finalId;
-                            store.selectChat(finalId);
-                            renderChat(true);
-                        }
+                        if (!exporting && finalId > 0) selectChat(finalId);
                         Toast.makeText(this, exporting ? "会话备份已导出" : "会话已导入", Toast.LENGTH_LONG).show();
                     } else Toast.makeText(this, finalError, Toast.LENGTH_LONG).show();
+                    if (exporting || finalId <= 0 || finalError != null) renderChat();
                 });
             });
         }
@@ -1678,7 +1857,13 @@ public final class MainActivity extends Activity {
         return result;
     }
 
+    @Override protected void onPause() {
+        if (composer != null) store.saveDraft(currentId, composer.getText().toString());
+        super.onPause();
+    }
+
     @Override protected void onDestroy() {
+        if (activeControl != null) activeControl.cancel();
         discardPendingImage();
         discardPendingFile();
         worker.shutdown();
@@ -1698,7 +1883,7 @@ public final class MainActivity extends Activity {
     }
 
     private RippleDrawable pressable(GradientDrawable content) {
-        return new RippleDrawable(ColorStateList.valueOf(Color.argb(45, 40, 135, 159)),
+        return new RippleDrawable(ColorStateList.valueOf(Color.argb(34, 129, 76, 52)),
                 content, null);
     }
 
