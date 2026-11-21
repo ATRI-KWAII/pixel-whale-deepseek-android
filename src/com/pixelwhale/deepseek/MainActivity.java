@@ -384,40 +384,15 @@ public final class MainActivity extends Activity {
         welcomeParams.topMargin = dp(18);
         hero.addView(welcome, welcomeParams);
 
-        LinearLayout suggestions = new LinearLayout(this);
-        suggestions.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout.LayoutParams suggestionParams = new LinearLayout.LayoutParams(-1, -2);
-        suggestionParams.topMargin = dp(24);
-        hero.addView(suggestions, suggestionParams);
-        addSuggestion(suggestions, "学一个知识点", "请用一个实际例子解释我接下来给你的知识点：");
-        addSuggestion(suggestions, "读懂一段代码", "请帮我理解下面的代码，先解释它的用途，再解释关键步骤：\n");
-        addSuggestion(suggestions, "梳理写作思路", "请帮我梳理以下写作主题的大纲：");
-
         if (!keyConfigured) {
             TextView setup = label("连接 DeepSeek API  ›", 13, ACCENT, true);
             setup.setGravity(Gravity.CENTER);
             setup.setMinimumHeight(dp(48));
-            hero.addView(setup, new LinearLayout.LayoutParams(-1, -2));
+            LinearLayout.LayoutParams setupParams = new LinearLayout.LayoutParams(-1, -2);
+            setupParams.topMargin = dp(11);
+            hero.addView(setup, setupParams);
             setup.setOnClickListener(v -> showSettings());
         }
-    }
-
-    private void addSuggestion(LinearLayout parent, String title, String prompt) {
-        TextView action = label(title + "  ↗", 14, INK, true);
-        action.setGravity(Gravity.CENTER_VERTICAL);
-        action.setPadding(dp(15), dp(9), dp(15), dp(9));
-        action.setMinimumHeight(dp(48));
-        action.setBackground(pressable(box(SURFACE, 13, BORDER, 1)));
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
-        params.bottomMargin = dp(8);
-        parent.addView(action, params);
-        action.setOnClickListener(v -> {
-            composer.setText(prompt);
-            composer.setSelection(composer.length());
-            composer.requestFocus();
-            InputMethodManager keyboard = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
-            if (keyboard != null) keyboard.showSoftInput(composer, InputMethodManager.SHOW_IMPLICIT);
-        });
     }
 
     private void addSummaryBanner(ConversationStore.Conversation chat) {
